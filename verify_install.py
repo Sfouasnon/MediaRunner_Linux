@@ -15,6 +15,8 @@ CANONICAL_FILES = [
     "mediarunner_meta.py",
     "mediarunner_red_wireless.py",
     "mediarunner_reports.py",
+    "mediarunner_notifications.py",
+    "mediarunner_linux_ingest.py",
     "mediarunner.py",
 ]
 REQUIRED_FILES = CANONICAL_FILES + [

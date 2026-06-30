@@ -5,7 +5,7 @@ a = Analysis(
     ['mediarunner_gui.py'],
     pathex=[],
     binaries=[],
-    datas=[('assets', 'assets'), ('validation', 'validation'), ('MediaRunner_LOGO.png', '.'), ('MediaRunner_LOGO_HTML.png', '.'), ('MediaRunner_REPORT_LOGO.png', '.'), ('mediarunner_core.py', '.'), ('mediarunner_ftp.py', '.'), ('mediarunner_transfer.py', '.'), ('mediarunner_meta.py', '.'), ('mediarunner_reports.py', '.'), ('mediarunner_red_wireless.py', '.'), ('mediarunner_mhl.py', '.'), ('mediarunner_logging.py', '.')],
+    datas=[('assets', 'assets'), ('validation', 'validation'), ('MediaRunner_LOGO.png', '.'), ('MediaRunner_LOGO_HTML.png', '.'), ('MediaRunner_REPORT_LOGO.png', '.'), ('mediarunner_core.py', '.'), ('mediarunner_ftp.py', '.'), ('mediarunner_transfer.py', '.'), ('mediarunner_meta.py', '.'), ('mediarunner_reports.py', '.'), ('mediarunner_red_wireless.py', '.'), ('mediarunner_mhl.py', '.'), ('mediarunner_logging.py', '.'), ('mediarunner_notifications.py', '.'), ('mediarunner_linux_ingest.py', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

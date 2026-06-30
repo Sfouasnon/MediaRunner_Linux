@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 MediaRunner GUI Version 0.3.0-beta — production hardening + concept UI port
-Navigation: Dashboard | Offload | FTP (Array / Single Camera) | Metadata | Reports | Networking | Settings | Validation (engineering-locked)
+Navigation: Dashboard | Offload | FTP (Array / Single Camera) | Metadata | Reports | Networking | Settings | Alerts | Validation (engineering-locked)
 
 Current engine support:
 - Folder/card transfer with selectable filters
@@ -387,6 +387,35 @@ def play_finish_chime():
                 subprocess.Popen([player, str(out)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
+
+
+def dispatch_completion_alert(summary: dict, log_callback=None) -> None:
+    """Send configured alerts in the background; never affect transfer status."""
+    payload = dict(summary or {})
+
+    def emit(message: str):
+        if callable(log_callback):
+            try:
+                log_callback(message)
+            except Exception:
+                pass
+
+    def work():
+        try:
+            from mediarunner_core import load_network_config
+            from mediarunner_notifications import send_alerts
+
+            results = send_alerts(load_network_config(), payload)
+            for result in results:
+                provider = result.get("provider", "Alert")
+                if result.get("status") == "sent":
+                    emit(f"Alert sent: {provider}")
+                else:
+                    emit(f"Alert failed: {provider}: {result.get('message', '')}")
+        except Exception as exc:
+            emit(f"Alert failed: {exc}")
+
+    threading.Thread(target=work, daemon=True, name="mediarunner-alerts").start()
 
 
 def human_bytes(num: int | float) -> str:
@@ -1310,6 +1339,7 @@ class TransferPage(QWidget, ActivityLogMixin):
         self._current_job_name = ""
         self._current_source = ""
         self._current_destinations = ""
+        self._current_reports = []
         self.signals = WorkerSignals(); self.thread = None
         # Audit fix #4: local transfers are now cancellable.
         self.cancel_event = threading.Event()
@@ -1346,10 +1376,48 @@ class TransferPage(QWidget, ActivityLogMixin):
         grid.addWidget(label("Job Name"), 0, 0)
         self.job_name = QLineEdit(); self.job_name.setPlaceholderText("Optional")
         grid.addWidget(self.job_name, 0, 1)
-        grid.addWidget(label("Source"), 1, 0)
-        w,self.source_path = path_picker("/Volumes/CARD_A001")
-        grid.addWidget(w, 1, 1)
         sv.addLayout(grid)
+
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(label("Source Mode"))
+        self.source_mode = SegmentedControl(["Single Source", "Multi-Mag"])
+        mode_row.addWidget(self.source_mode, 1)
+        sv.addLayout(mode_row)
+
+        self.single_source_box = QWidget()
+        single_grid = QGridLayout(self.single_source_box); single_grid.setContentsMargins(0,0,0,0); single_grid.setSpacing(10)
+        single_grid.addWidget(label("Source"), 0, 0)
+        w,self.source_path = path_picker("/media/card/A001")
+        single_grid.addWidget(w, 0, 1)
+        sv.addWidget(self.single_source_box)
+
+        self.multi_source_box = QWidget()
+        multi_v = QVBoxLayout(self.multi_source_box); multi_v.setContentsMargins(0,0,0,0); multi_v.setSpacing(8)
+        self.mag_table = QTableWidget(0, 2)
+        self.mag_table.setHorizontalHeaderLabels(["Magazine", "Path"])
+        self.mag_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.mag_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.mag_table.setAlternatingRowColors(True)
+        self.mag_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.mag_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.mag_table.setMinimumHeight(120)
+        self.mag_table.setMaximumHeight(190)
+        multi_v.addWidget(self.mag_table)
+        mag_buttons = QHBoxLayout()
+        add_mag = QPushButton("Add Magazine...")
+        add_mag.clicked.connect(self.select_magazine_source)
+        detect_mag = QPushButton("Detect Mounted")
+        detect_mag.clicked.connect(self.detect_magazine_sources)
+        remove_mag = QPushButton("Remove Selected")
+        remove_mag.clicked.connect(self.remove_magazine_sources)
+        mag_buttons.addWidget(add_mag)
+        mag_buttons.addWidget(detect_mag)
+        mag_buttons.addWidget(remove_mag)
+        mag_buttons.addStretch()
+        multi_v.addLayout(mag_buttons)
+        sv.addWidget(self.multi_source_box)
+        self.source_mode.changed.connect(lambda _t: self.update_source_mode_visibility())
+        self.update_source_mode_visibility()
 
         # Payload preview: show file count + total size as soon as a source is
         # picked, scanned on a background thread so the UI never blocks.
@@ -1452,8 +1520,12 @@ class TransferPage(QWidget, ActivityLogMixin):
 
         run_panel, rv = panel("Run")
         self.threads_spin = QComboBox(); self.threads_spin.addItems(["4", "8", "12", "16"])
-        rgrid = QGridLayout(); rgrid.addWidget(label("Threads"),0,0); rgrid.addWidget(self.threads_spin,0,1)
+        self.threads_label = label("Threads")
+        rgrid = QGridLayout(); rgrid.addWidget(self.threads_label,0,0); rgrid.addWidget(self.threads_spin,0,1)
         rv.addLayout(rgrid)
+        self.run_note = label("", "muted")
+        self.run_note.setWordWrap(True)
+        rv.addWidget(self.run_note)
         self.start_btn = QPushButton("Start Transfer"); self.start_btn.setObjectName("primary"); self.start_btn.clicked.connect(self.start_transfer)
         rv.addWidget(self.start_btn)
         self.stop_btn = QPushButton("Stop"); self.stop_btn.setEnabled(False); self.stop_btn.clicked.connect(self.request_stop)
@@ -1485,6 +1557,74 @@ class TransferPage(QWidget, ActivityLogMixin):
             self.reel_filter.clear()
             self.clip_filter.clear()
 
+    def update_source_mode_visibility(self):
+        multi = self.source_mode.current() == "Multi-Mag"
+        if hasattr(self, "single_source_box"):
+            self.single_source_box.setVisible(not multi)
+        if hasattr(self, "multi_source_box"):
+            self.multi_source_box.setVisible(multi)
+        if hasattr(self, "threads_spin"):
+            self.threads_spin.setEnabled(not multi)
+        if hasattr(self, "threads_label"):
+            self.threads_label.setText("Threads" if not multi else "Single-source threads")
+        if hasattr(self, "run_note"):
+            self.run_note.setText("Multi-Mag uses Settings > Linux Ingest for magazine concurrency and per-magazine threads." if multi else "")
+            if multi:
+                self._refresh_destination_profile_note()
+        if hasattr(self, "_payload_scan_timer"):
+            self._payload_scan_timer.start()
+
+    def add_magazine_source(self, path: str | Path):
+        path_obj = Path(path).expanduser()
+        if not str(path_obj).strip():
+            return
+        existing = {str(self.mag_table.item(r, 1).data(Qt.UserRole)) for r in range(self.mag_table.rowCount()) if self.mag_table.item(r, 1)}
+        if str(path_obj) in existing:
+            return
+        row = self.mag_table.rowCount()
+        self.mag_table.insertRow(row)
+        name_item = QTableWidgetItem(path_obj.name or f"Magazine {row + 1}")
+        path_item = QTableWidgetItem(str(path_obj))
+        path_item.setData(Qt.UserRole, str(path_obj))
+        self.mag_table.setItem(row, 0, name_item)
+        self.mag_table.setItem(row, 1, path_item)
+        if hasattr(self, "_payload_scan_timer"):
+            self._payload_scan_timer.start()
+
+    def select_magazine_source(self):
+        d = QFileDialog.getExistingDirectory(self, "Select Magazine Source", str(Path("/media") if Path("/media").exists() else Path.home()))
+        if d:
+            self.add_magazine_source(d)
+
+    def remove_magazine_sources(self):
+        rows = sorted({i.row() for i in self.mag_table.selectedIndexes()}, reverse=True)
+        for r in rows:
+            self.mag_table.removeRow(r)
+        if hasattr(self, "_payload_scan_timer"):
+            self._payload_scan_timer.start()
+
+    def detect_magazine_sources(self):
+        try:
+            from mediarunner_linux_ingest import discover_mounted_magazines
+            found = discover_mounted_magazines()
+            for source in found:
+                self.add_magazine_source(source)
+            self.payload_label.setText(f"Detected {len(found)} magazine source{'s' if len(found) != 1 else ''}")
+        except Exception as exc:
+            self.payload_label.setText(f"Magazine detection failed: {exc}")
+
+    def sources(self) -> list[Path]:
+        if self.source_mode.current() != "Multi-Mag":
+            text = self.source_path.text().strip()
+            return [Path(text).expanduser()] if text else []
+        out = []
+        for r in range(self.mag_table.rowCount()):
+            item = self.mag_table.item(r, 1)
+            path_text = item.data(Qt.UserRole) if item else ""
+            if path_text:
+                out.append(Path(str(path_text)).expanduser())
+        return out
+
     def next_destination_role(self) -> str:
         roles = ["Primary", "Secondary", "Third", "Fourth", "Fifth", "Sixth"]
         n = self.dest_table.rowCount()
@@ -1508,6 +1648,7 @@ class TransferPage(QWidget, ActivityLogMixin):
         self.dest_table.setItem(row, 2, avail_item)
         self.dest_table.setItem(row, 3, status_item)
         self.update_single_destination_space(row)
+        self._refresh_destination_profile_note()
 
     def select_destination(self):
         d = QFileDialog.getExistingDirectory(self, "Select Destination", str(Path.home()))
@@ -1519,6 +1660,7 @@ class TransferPage(QWidget, ActivityLogMixin):
         for r in rows:
             self.dest_table.removeRow(r)
         self.renumber_destination_roles()
+        self._refresh_destination_profile_note()
 
     def renumber_destination_roles(self):
         roles = ["Primary", "Secondary", "Third", "Fourth", "Fifth", "Sixth"]
@@ -1563,6 +1705,30 @@ class TransferPage(QWidget, ActivityLogMixin):
                 out.append((role_item.text().strip() if role_item else f"Destination {r + 1}", Path(str(path_text)).expanduser(), r))
         return out
 
+    def _refresh_destination_profile_note(self):
+        if not hasattr(self, "run_note") or self.source_mode.current() != "Multi-Mag":
+            return
+        dests = []
+        for r in range(self.dest_table.rowCount()):
+            dest_item = self.dest_table.item(r, 1)
+            path_text = dest_item.data(Qt.UserRole) if dest_item else ""
+            if path_text:
+                dests.append(Path(str(path_text)).expanduser())
+        if not dests:
+            self.run_note.setText("Multi-Mag uses Settings > Linux Ingest for magazine concurrency and per-magazine threads.")
+            return
+        try:
+            from mediarunner_linux_ingest import derive_ingest_settings_for_destinations
+            cfg = self.settings_page.get_config() if self.settings_page and hasattr(self.settings_page, "get_config") else {}
+            max_magazines, threads_per_magazine, profiles = derive_ingest_settings_for_destinations(cfg, dests)
+            if profiles:
+                labels = ", ".join(str(p.get("label") or Path(str(p.get("path", ""))).name or "Destination") for p in profiles)
+                self.run_note.setText(f"Destination profile default: {max_magazines} magazines, {threads_per_magazine} thread/mag from {labels}.")
+            else:
+                self.run_note.setText("No destination profile matched. Multi-Mag will use Settings > Linux Ingest defaults.")
+        except Exception:
+            self.run_note.setText("Multi-Mag uses Settings > Linux Ingest for magazine concurrency and per-magazine threads.")
+
     PROGRESS_SCALE = 10000  # fine-grained bar units so byte progress is smooth
 
     def _start_payload_scan(self):
@@ -1572,36 +1738,41 @@ class TransferPage(QWidget, ActivityLogMixin):
         the source mid-scan). The scan walks the same discovery rules as the
         transfer, so the number shown is the number that will move.
         """
-        text = self.source_path.text().strip()
         self._payload_scan_generation += 1
         generation = self._payload_scan_generation
-        if not text:
+        roots = self.sources()
+        if not roots:
             self.signals.payload_preview.emit("")
             return
-        root = Path(text).expanduser()
-        if not root.exists() or not root.is_dir():
+        valid_roots = [root for root in roots if root.exists() and root.is_dir()]
+        if not valid_roots:
             self.signals.payload_preview.emit("")
             return
         self.signals.payload_preview.emit("Payload: scanning…")
         sig = self.signals
+        multi_mode = self.source_mode.current() == "Multi-Mag"
 
         def scan():
             try:
                 from mediarunner_transfer import discover_files
                 total = 0
                 count = 0
-                for f, _cam, _reel, _clip in discover_files(root, []):
-                    if generation != self._payload_scan_generation:
-                        return  # superseded by a newer selection
-                    try:
-                        total += f.stat().st_size
-                    except OSError:
-                        continue
-                    count += 1
+                source_count = 0
+                for root in valid_roots:
+                    source_count += 1
+                    for f, _cam, _reel, _clip in discover_files(root, []):
+                        if generation != self._payload_scan_generation:
+                            return  # superseded by a newer selection
+                        try:
+                            total += f.stat().st_size
+                        except OSError:
+                            continue
+                        count += 1
                 if generation != self._payload_scan_generation:
                     return
                 if count:
-                    sig.payload_preview.emit(f"Payload: {count} file{'s' if count != 1 else ''} · {human_bytes(total)}")
+                    prefix = f"{source_count} magazine{'s' if source_count != 1 else ''} · " if multi_mode else ""
+                    sig.payload_preview.emit(f"Payload: {prefix}{count} file{'s' if count != 1 else ''} · {human_bytes(total)}")
                 else:
                     sig.payload_preview.emit("Payload: no media files found")
             except Exception as exc:
@@ -1652,7 +1823,10 @@ class TransferPage(QWidget, ActivityLogMixin):
             self.dashboard.set_active_job("Running", event.get("job", ""), event.get("source", ""), event.get("destination", ""), "0 / 0")
             self.dashboard.reset_destination_progress(event.get("destinations", []))
         elif kind == "report":
-            self.dashboard.add_recent_output(event.get("path", ""))
+            path = str(event.get("path", "") or "").strip()
+            if path:
+                self._current_reports.append(path)
+            self.dashboard.add_recent_output(path)
         elif kind == "throughput":
             self.dashboard.set_transfer_rate(event.get("bytes_per_sec", 0), event.get("phase", "Transfer"))
         elif kind == "complete":
@@ -1697,14 +1871,491 @@ class TransferPage(QWidget, ActivityLogMixin):
             "destination": self._current_destinations,
             "progress": self.progress_label.text(),
         })
+        dispatch_completion_alert({
+            "status": msg,
+            "workflow": "Offload",
+            "job": self._current_job_name,
+            "source": self._current_source,
+            "destinations": self._current_destinations,
+            "progress": self.progress_label.text(),
+            "reports": list(dict.fromkeys(self._current_reports)),
+        }, self.signals.log.emit)
+
+    def start_multi_magazine_transfer(self, sources: list[Path], dests: list[tuple[str, Path, int]]):
+        sources = [Path(p).expanduser() for p in sources if str(p).strip()]
+        if not sources or not dests:
+            self.status_label.setText("Magazine source and destination required")
+            log_to(self.console, "At least one magazine source and one destination are required", RED)
+            return
+        self.start_btn.setEnabled(False); self.progress.setValue(0)
+        self._file_fraction = 0.0
+        self._byte_fraction = 0.0
+        self._progress_text = ""
+        self.cancel_event.clear()
+        self.stop_btn.setEnabled(True)
+        self.resume_btn.setEnabled(False)
+        self.resume_btn.setText("Resume")
+        self.status_label.setText("Running")
+
+        sig = self.signals
+        cancel_event = self.cancel_event
+        job_name = self.job_name.text().strip() or "Multi-Mag Ingest"
+        verify_mode = self.verify_seg.current()
+        verify = verify_mode != "Off"
+        tokens = [] if self.scope_seg.current() == "Entire folder" else build_filter_tokens(self.camera_filter.text(), self.reel_filter.text(), self.clip_filter.text())
+        strategy = self.strategy_seg.current()
+        if strategy not in ("Cascading", "Simultaneous", "Primary First"):
+            strategy = "Primary First"
+        cfg = self.settings_page.get_config() if self.settings_page and hasattr(self.settings_page, "get_config") else {}
+        try:
+            from mediarunner_linux_ingest import derive_ingest_settings_for_destinations
+            max_magazines, threads_per_magazine, matched_profiles = derive_ingest_settings_for_destinations(cfg, [dst for _role, dst, _row in dests])
+        except Exception:
+            max_magazines = max(1, min(24, int(cfg.get("linux_max_simultaneous_magazines", 6) or 6)))
+            threads_per_magazine = max(1, min(8, int(cfg.get("linux_threads_per_magazine", 1) or 1)))
+            matched_profiles = []
+        stage_subfolders = bool(cfg.get("linux_stage_magazine_subfolders", True))
+        if matched_profiles:
+            profile_names = ", ".join(str(p.get("label") or Path(str(p.get("path", ""))).name or "Destination") for p in matched_profiles)
+            log_to(self.console, f"Using destination profile defaults: {max_magazines} magazines, {threads_per_magazine} thread/mag ({profile_names})", ACCENT)
+        if len(sources) > 1 and not stage_subfolders:
+            log_to(self.console, "Warning: multi-magazine ingest without destination subfolders can collide if card paths match.", YELLOW)
+
+        self._current_job_name = job_name
+        self._current_source = f"{len(sources)} magazine source{'s' if len(sources) != 1 else ''}"
+        self._current_destinations = ", ".join(str(d[1]) for d in dests)
+        self._current_reports = []
+        self.signals.job_event.emit({
+            "type": "start",
+            "job": self._current_job_name,
+            "source": self._current_source,
+            "destination": self._current_destinations,
+            "destinations": [{"role": role, "total": 0} for role, _dst, _row in dests],
+        })
+        if callable(self.nav_callback):
+            self.nav_callback()
+
+        def work():
+            try:
+                from mediarunner_core import (
+                    Manifest,
+                    write_html_report,
+                    TransferStatus,
+                    cleanup_stale_parts,
+                    FatalTransferError,
+                    TransferCancelledError,
+                )
+                from mediarunner_transfer import discover_files, transfer_file
+                import threading as _t
+
+                def cancelled() -> bool:
+                    return cancel_event.is_set()
+
+                def abort_job(reason: str):
+                    if not cancel_event.is_set():
+                        sig.log.emit(f"FATAL: {reason} - aborting job")
+                        cancel_event.set()
+
+                def safe_token(value: str, fallback: str) -> str:
+                    value = (value or fallback).strip()
+                    cleaned = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in value)
+                    return cleaned or fallback
+
+                class ContextManifest:
+                    def __init__(self, manifest, method: str, source: Path, destination: Path):
+                        self.manifest = manifest
+                        self.path = manifest.path
+                        self.method = method
+                        self.source = str(source)
+                        self.destination = str(destination)
+                    def write(self, **kwargs):
+                        kwargs.setdefault("method", self.method)
+                        kwargs.setdefault("source_path", self.source)
+                        kwargs.setdefault("destination_path", self.destination)
+                        self.manifest.write(**kwargs)
+
+                plans = []
+                name_counts: dict[str, int] = {}
+                for idx, source in enumerate(sources, 1):
+                    if not source.exists() or not source.is_dir():
+                        sig.log.emit(f"Skipping missing magazine source: {source}")
+                        continue
+                    files_meta = discover_files(source, tokens)
+                    if not files_meta:
+                        sig.log.emit(f"No media files found on magazine source: {source}")
+                        continue
+                    try:
+                        payload = sum(f.stat().st_size for f, _cam, _reel, _clip in files_meta)
+                    except Exception:
+                        payload = 0
+                    base_name = safe_token(source.name or f"magazine_{idx}", f"magazine_{idx}")
+                    name_counts[base_name] = name_counts.get(base_name, 0) + 1
+                    safe_name = base_name if name_counts[base_name] == 1 else f"{base_name}_{name_counts[base_name]}"
+                    plans.append({
+                        "source": source,
+                        "display_name": source.name or safe_name,
+                        "safe_name": safe_name,
+                        "files_meta": files_meta,
+                        "payload": payload,
+                    })
+
+                if not plans:
+                    sig.log.emit("No usable magazine sources found.")
+                    sig.finished.emit(False)
+                    return
+
+                total_files = sum(len(plan["files_meta"]) for plan in plans)
+                payload_bytes = sum(int(plan["payload"]) for plan in plans)
+                total_work = max(1, total_files * max(1, len(dests)))
+                sig.log.emit(f"Multi-magazine ingest: {len(plans)} magazine(s) · {total_files} files · {human_bytes(payload_bytes)}")
+                sig.log.emit(f"Magazine concurrency: {max_magazines} · threads per magazine: {threads_per_magazine}")
+                if matched_profiles:
+                    profile_names = ", ".join(str(p.get("label") or Path(str(p.get("path", ""))).name or "Destination") for p in matched_profiles)
+                    sig.log.emit(f"Destination profiles applied: {profile_names}")
+                if verify_mode == "Deferred pass":
+                    sig.log.emit("Multi-magazine mode uses inline checksum verification to avoid an extra source read.")
+                else:
+                    sig.log.emit("Verification timing: inline with copy" if verify else "Verification: OFF")
+
+                HEADROOM = 0.02
+                available_by_row: dict[int, str] = {}
+                volume_required: dict = {}
+                volume_free: dict = {}
+                volume_rows: dict = {}
+                for role, dst, table_row in dests:
+                    try:
+                        dst.mkdir(parents=True, exist_ok=True)
+                        free = disk_free_bytes(dst)
+                        free_h = human_bytes(free)
+                        available_by_row[table_row] = free_h
+                        sig.dest_status.emit(table_row, free_h, "Ready")
+                        try:
+                            volume_key = os.stat(dst).st_dev
+                        except Exception:
+                            volume_key = str(dst)
+                        volume_required[volume_key] = volume_required.get(volume_key, 0) + payload_bytes
+                        volume_free[volume_key] = free
+                        volume_rows.setdefault(volume_key, []).append((role, table_row))
+                    except Exception as exc:
+                        sig.dest_status.emit(table_row, "-", "Missing")
+                        sig.log.emit(f"Cannot read available space for {role}: {exc}")
+                        sig.finished.emit(False)
+                        return
+
+                for volume_key, required in volume_required.items():
+                    needed = int(required * (1 + HEADROOM))
+                    free = volume_free.get(volume_key, 0)
+                    if needed > free:
+                        roles_text = ", ".join(role for role, _row in volume_rows.get(volume_key, []))
+                        sig.log.emit(
+                            f"Insufficient space on volume holding {roles_text}: need {human_bytes(needed)}, available {human_bytes(free)}"
+                        )
+                        for _role, table_row in volume_rows.get(volume_key, []):
+                            sig.dest_status.emit(table_row, human_bytes(free), "Insufficient")
+                        sig.finished.emit(False)
+                        return
+
+                for _role, dst, _table_row in dests:
+                    removed = cleanup_stale_parts(dst)
+                    if removed:
+                        sig.log.emit(f"Removed {removed} stale .part file(s) under {dst}")
+
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                safe_project = safe_token(job_name, "Multi_Mag_Ingest")
+                method_label = "Linux Multi-Magazine Ingest"
+                progress_roles = []
+                for plan in plans:
+                    plan_contexts = []
+                    for idx, (role, dst_path, table_row) in enumerate(dests, 1):
+                        target_root = dst_path / plan["safe_name"] if stage_subfolders else dst_path
+                        checksums = dst_path / "_checksums"
+                        checksums.mkdir(parents=True, exist_ok=True)
+                        target_root.mkdir(parents=True, exist_ok=True)
+                        safe_role = safe_token(role, f"destination_{idx}")
+                        manifest_csv = checksums / f"MediaRunner_Manifest_{safe_project}_{plan['safe_name']}_{safe_role}_{ts}.csv"
+                        base_manifest = Manifest(manifest_csv)
+                        context = {
+                            "role": role,
+                            "progress_role": f"{plan['display_name']} / {role}",
+                            "dst": target_root,
+                            "root_dst": dst_path,
+                            "table_row": table_row,
+                            "checksums": checksums,
+                            "manifest_csv": manifest_csv,
+                            "manifest": ContextManifest(base_manifest, method_label, plan["source"], target_root),
+                            "lock": _t.Lock(),
+                            "safe_role": safe_role,
+                            "source_root": plan["source"],
+                        }
+                        plan_contexts.append(context)
+                        progress_roles.append({"role": context["progress_role"], "total": len(plan["files_meta"])})
+                        sig.log.emit(f"{context['progress_role']} manifest: {manifest_csv}")
+                    plan["contexts"] = plan_contexts
+
+                sig.job_event.emit({
+                    "type": "start",
+                    "job": self._current_job_name,
+                    "source": self._current_source,
+                    "destination": self._current_destinations,
+                    "destinations": progress_roles,
+                })
+                sig.progress.emit(0, total_work)
+
+                aggregate_done = 0
+                aggregate_lock = _t.Lock()
+                progress_lock = _t.Lock()
+                throughput_lock = _t.Lock()
+                fail_lock = _t.Lock()
+                done_by_role = {item["role"]: 0 for item in progress_roles}
+                fail_by_row = {table_row: 0 for _role, _dst, table_row in dests}
+                copy_started_at = None
+                copied_bytes_done = 0
+                last_throughput_emit = [0.0]
+                total_payload_all = max(1, payload_bytes * max(1, len(dests)))
+
+                def emit_role_progress(progress_role: str, total: int, status: str = "Running", increment: bool = False):
+                    nonlocal aggregate_done
+                    with progress_lock:
+                        if increment:
+                            done_by_role[progress_role] = done_by_role.get(progress_role, 0) + 1
+                        done_for_role = done_by_role.get(progress_role, 0)
+                    sig.dest_progress.emit({"role": progress_role, "done": done_for_role, "total": total, "status": status})
+                    if increment:
+                        with aggregate_lock:
+                            aggregate_done += 1
+                            sig.progress.emit(aggregate_done, total_work)
+
+                def emit_throughput(byte_count: int = 0, phase: str = "Multi-Mag Copy"):
+                    nonlocal copied_bytes_done, copy_started_at
+                    amount = max(0, int(byte_count or 0))
+                    if amount <= 0:
+                        return
+                    with throughput_lock:
+                        now = time.time()
+                        if copy_started_at is None:
+                            copy_started_at = now
+                        copied_bytes_done += amount
+                        elapsed = max(0.001, now - copy_started_at)
+                        bytes_per_sec = copied_bytes_done / elapsed
+                        if (now - last_throughput_emit[0]) < 0.2:
+                            return
+                        last_throughput_emit[0] = now
+                        bytes_snapshot = copied_bytes_done
+                    sig.job_event.emit({
+                        "type": "throughput",
+                        "bytes_per_sec": bytes_per_sec,
+                        "bytes_done": bytes_snapshot,
+                        "total_bytes": total_payload_all,
+                        "phase": phase,
+                    })
+                    sig.job_event.emit({
+                        "type": "byte_progress",
+                        "fraction": min(1.0, bytes_snapshot / total_payload_all),
+                    })
+
+                def emit_table(role: str, status: str, src_file: Path, cam: str, reel: str, clip: str):
+                    try:
+                        size = src_file.stat().st_size
+                    except Exception:
+                        size = 0
+                    sig.table_row.emit({
+                        "status": status,
+                        "destination": role,
+                        "camera": cam,
+                        "reel": reel,
+                        "clip": clip,
+                        "file": src_file.name,
+                        "size_bytes": size,
+                        "src_hash": "See manifest",
+                    })
+
+                def write_reports(plan: dict, ctx: dict):
+                    manifest_csv = ctx["manifest_csv"]
+                    if self.report_html.isChecked():
+                        report_name = f"MediaRunner_Report_{safe_project}_{plan['safe_name']}_{ctx['safe_role']}_{ts}.html"
+                        report = ctx["checksums"] / report_name
+                        try:
+                            ok_c, fail_c = write_html_report(
+                                manifest_csv,
+                                f"{job_name} - {plan['display_name']}",
+                                report,
+                                source_path=str(ctx["source_root"]),
+                                destination_path=str(ctx["dst"]),
+                                method_label=method_label,
+                            )
+                            sig.log.emit(f"Report: {report} ({ok_c} OK / {fail_c} FAIL)")
+                            sig.job_event.emit({"type": "report", "path": str(report)})
+                        except Exception as exc:
+                            sig.log.emit(f"Report failed for {ctx['progress_role']}: {exc}")
+                    if self.report_csv.isChecked():
+                        sig.log.emit(f"CSV manifest ready: {manifest_csv}")
+                        sig.job_event.emit({"type": "report", "path": str(manifest_csv)})
+
+                def copy_stage(plan: dict, ctx: dict, source_root: Path, files_meta: list, stage_threads: int) -> bool:
+                    progress_role = ctx["progress_role"]
+                    total_for_role = len(files_meta)
+                    dst_root = ctx["dst"]
+                    ctx["source_root"] = source_root
+                    ctx["manifest"].source = str(source_root)
+                    ctx["manifest"].destination = str(dst_root)
+                    emit_role_progress(progress_role, total_for_role, "Running", increment=False)
+                    sig.dest_status.emit(ctx["table_row"], available_by_row.get(ctx["table_row"], "-"), "Running")
+                    sig.log.emit(f"{progress_role}: {source_root} -> {dst_root}")
+                    files = [(f, dst_root / f.relative_to(source_root), cam, reel, clip) for f, cam, reel, clip in files_meta]
+                    fail_count = 0
+
+                    with ThreadPoolExecutor(max_workers=max(1, int(stage_threads))) as pool:
+                        futures = {
+                            pool.submit(
+                                transfer_file,
+                                s,
+                                d,
+                                ctx["manifest"],
+                                cam,
+                                reel,
+                                clip,
+                                verify,
+                                ctx["lock"],
+                                progress_callback=lambda n: emit_throughput(n, "Multi-Mag Copy"),
+                                cancel_check=cancelled,
+                            ): (s, d, cam, reel, clip)
+                            for s, d, cam, reel, clip in files
+                            if not cancelled()
+                        }
+                        for fut in as_completed(futures):
+                            s, _d, cam, reel, clip = futures[fut]
+                            was_cancelled = False
+                            try:
+                                ok = bool(fut.result())
+                            except TransferCancelledError as exc:
+                                ok = False
+                                was_cancelled = True
+                                with ctx["lock"]:
+                                    ctx["manifest"].write(
+                                        camera=cam, reel=reel, clip=clip, file=s.name,
+                                        size_bytes=s.stat().st_size if s.exists() else 0,
+                                        size_human=human_bytes(s.stat().st_size) if s.exists() else "0 B",
+                                        status=TransferStatus.CANCELLED,
+                                        verification_status=TransferStatus.CANCELLED,
+                                        error=str(exc), note="Cancelled during multi-magazine copy",
+                                    )
+                            except FatalTransferError as exc:
+                                ok = False
+                                abort_job(str(exc))
+                                with ctx["lock"]:
+                                    ctx["manifest"].write(
+                                        camera=cam, reel=reel, clip=clip, file=s.name,
+                                        size_bytes=s.stat().st_size if s.exists() else 0,
+                                        size_human=human_bytes(s.stat().st_size) if s.exists() else "0 B",
+                                        status="ERROR", note=str(exc),
+                                    )
+                                sig.log.emit(f"{progress_role} {s.name}: {exc}")
+                            except Exception as exc:
+                                ok = False
+                                with ctx["lock"]:
+                                    ctx["manifest"].write(
+                                        camera=cam, reel=reel, clip=clip, file=s.name,
+                                        size_bytes=s.stat().st_size if s.exists() else 0,
+                                        size_human=human_bytes(s.stat().st_size) if s.exists() else "0 B",
+                                        status="ERROR", note=str(exc),
+                                    )
+                                sig.log.emit(f"{progress_role} {s.name}: {exc}")
+                            status = "Verified" if ok and verify else ("Copied" if ok else ("Cancelled" if was_cancelled else "FAIL"))
+                            if not ok:
+                                fail_count += 1
+                            emit_table(progress_role, status, s, cam, reel, clip)
+                            emit_role_progress(progress_role, total_for_role, "Running", increment=True)
+                            if cancelled() and not was_cancelled:
+                                was_cancelled = True
+                    if fail_count:
+                        with fail_lock:
+                            fail_by_row[ctx["table_row"]] = fail_by_row.get(ctx["table_row"], 0) + fail_count
+                    final_status = "Cancelled" if cancelled() else ("Complete" if fail_count == 0 else "Errors")
+                    emit_role_progress(progress_role, total_for_role, final_status, increment=False)
+                    write_reports(plan, ctx)
+                    return fail_count == 0 and not cancelled()
+
+                def copy_magazine(plan: dict) -> bool:
+                    contexts = list(plan.get("contexts") or [])
+                    if not contexts:
+                        return True
+                    sig.log.emit(f"Magazine {plan['display_name']}: starting")
+                    if strategy == "Simultaneous" and len(contexts) > 1:
+                        per_dest_threads = max(1, int(threads_per_magazine) // len(contexts))
+                        ok_map = {}
+                        with ThreadPoolExecutor(max_workers=len(contexts)) as pool:
+                            futures = {
+                                pool.submit(copy_stage, plan, ctx, plan["source"], plan["files_meta"], per_dest_threads): ctx
+                                for ctx in contexts
+                            }
+                            for future in as_completed(futures):
+                                ctx = futures[future]
+                                try:
+                                    ok_map[ctx["progress_role"]] = bool(future.result())
+                                except Exception as exc:
+                                    ok_map[ctx["progress_role"]] = False
+                                    sig.log.emit(f"{ctx['progress_role']} failed: {exc}")
+                        return all(ok_map.values()) if ok_map else True
+
+                    current_source_root = plan["source"]
+                    current_meta = list(plan["files_meta"])
+                    magazine_ok = True
+                    for ctx in contexts:
+                        if cancelled():
+                            magazine_ok = False
+                            break
+                        ok = copy_stage(plan, ctx, current_source_root, current_meta, threads_per_magazine)
+                        magazine_ok = magazine_ok and ok
+                        if strategy == "Cascading" and ok:
+                            next_meta = [
+                                (ctx["dst"] / f.relative_to(current_source_root), cam, reel, clip)
+                                for f, cam, reel, clip in current_meta
+                            ]
+                            current_meta = next_meta
+                            current_source_root = ctx["dst"]
+                        elif strategy == "Cascading" and not ok:
+                            break
+                    return magazine_ok
+
+                overall_ok = True
+                with ThreadPoolExecutor(max_workers=max(1, min(max_magazines, len(plans)))) as pool:
+                    futures = {pool.submit(copy_magazine, plan): plan for plan in plans}
+                    for future in as_completed(futures):
+                        plan = futures[future]
+                        try:
+                            plan_ok = bool(future.result())
+                        except Exception as exc:
+                            plan_ok = False
+                            sig.log.emit(f"Magazine {plan.get('display_name', '')} failed: {exc}")
+                        overall_ok = overall_ok and plan_ok
+                        if cancelled():
+                            overall_ok = False
+
+                for role, _dst, table_row in dests:
+                    if cancelled():
+                        status = "Cancelled"
+                    else:
+                        status = "Complete" if fail_by_row.get(table_row, 0) == 0 and overall_ok else "Errors"
+                    sig.dest_status.emit(table_row, available_by_row.get(table_row, "-"), status)
+
+                sig.finished.emit(bool(overall_ok and not cancelled()))
+            except Exception as exc:
+                sig.log.emit(f"ERROR: {exc}")
+                sig.finished.emit(False)
+
+        self.thread = threading.Thread(target=work, daemon=True); self.thread.start()
 
     def start_transfer(self):
-        src = self.source_path.text().strip()
+        source_paths = self.sources()
         dests = self.destinations()
-        if not src or not dests:
+        if not source_paths or not dests:
             self.status_label.setText("Source and destination required")
             log_to(self.console, "Source and at least one destination are required", RED)
             return
+        if self.source_mode.current() == "Multi-Mag":
+            self.start_multi_magazine_transfer(source_paths, dests)
+            return
+        src = str(source_paths[0])
         self.start_btn.setEnabled(False); self.progress.setValue(0)
         self._file_fraction = 0.0
         self._byte_fraction = 0.0
@@ -1734,6 +2385,7 @@ class TransferPage(QWidget, ActivityLogMixin):
         self._current_job_name = job_name or "Untitled"
         self._current_source = str(src_path)
         self._current_destinations = ", ".join(str(d[1]) for d in dests)
+        self._current_reports = []
         self.signals.job_event.emit({
             "type": "start",
             "job": self._current_job_name,
@@ -2376,6 +3028,10 @@ class TransferPage(QWidget, ActivityLogMixin):
 class FTPPage(QWidget, ActivityLogMixin):
     def __init__(self, settings_page=None, dashboard=None, nav_callback=None, sound_settings_page=None):
         super().__init__(); self.settings_page = settings_page; self.sound_settings_page = sound_settings_page; self.dashboard = dashboard; self.nav_callback = nav_callback; self.signals = WorkerSignals(); self.thread = None; self.detected = {}; self.last_scan_checked = 0; self._scan_running = False; self.cancel_event = threading.Event()
+        self._current_job_name = ""
+        self._current_source = ""
+        self._current_destinations = ""
+        self._current_reports = []
         self._build_ui()
         self.signals.log.connect(self.handle_log)
         self.signals.status.connect(self.status_label.setText)
@@ -2584,10 +3240,21 @@ class FTPPage(QWidget, ActivityLogMixin):
             if not ok:
                 self.status_label.setText("Scan failed")
             return
-        self.status_label.setText("Complete" if ok else "Finished with errors")
+        was_cancelled = self.cancel_event.is_set()
+        msg = "Cancelled" if was_cancelled and not ok else ("Complete" if ok else "Finished with errors")
+        self.status_label.setText(msg)
         self.maybe_play_finish_sound(ok)
         if self.dashboard:
-            self.dashboard.set_active_job("Complete" if ok else "Finished with errors", "FTP Download", "Camera Array", "", self.progress_label.text())
+            self.dashboard.set_active_job(msg, "FTP Download", "Camera Array", "", self.progress_label.text())
+        dispatch_completion_alert({
+            "status": msg,
+            "workflow": "FTP Camera Array",
+            "job": self._current_job_name,
+            "source": self._current_source,
+            "destinations": self._current_destinations,
+            "progress": self.progress_label.text(),
+            "reports": list(dict.fromkeys(self._current_reports)),
+        }, self.signals.log.emit)
 
     def on_job_event(self, event: dict):
         kind = str(event.get("type", "") or "")
@@ -2599,6 +3266,8 @@ class FTPPage(QWidget, ActivityLogMixin):
                     self.dashboard.update_active_progress(text)
         elif kind == "report":
             path = str(event.get("path", "") or "").strip()
+            if path:
+                self._current_reports.append(path)
             if path and self.dashboard:
                 self.dashboard.add_recent_output(path)
 
@@ -2688,6 +3357,10 @@ class FTPPage(QWidget, ActivityLogMixin):
                 log_to(self.console, "No online cameras in previous scan. Run Detect Cameras again after updating the camera network.", YELLOW)
                 return
         online_only = self.skip_offline.isChecked() and not use_previous_scan
+        self._current_job_name = f"FTP Reel {reel}"
+        self._current_source = "Camera Array"
+        self._current_destinations = ", ".join(str(d[1]) for d in dests)
+        self._current_reports = []
         self.run_btn.setEnabled(False); self.detect_btn.setEnabled(False); self.table.setRowCount(0); self.status_label.setText("Running")
         if self.dashboard:
             self.dashboard.set_active_job("Running", f"FTP Reel {reel}", "Camera Array", ", ".join(str(d[1]) for d in dests), "0 / 0")
@@ -2759,6 +3432,10 @@ class RedWirelessPage(QWidget, ActivityLogMixin):
         self.thread = None
         self.identity = None
         self.discovery = None
+        self._current_job_name = ""
+        self._current_source = ""
+        self._current_destinations = ""
+        self._current_reports = []
         self._build_ui()
         self.signals.log.connect(self.handle_log)
         self.signals.status.connect(self.status_label.setText)
@@ -3045,15 +3722,28 @@ class RedWirelessPage(QWidget, ActivityLogMixin):
         if "bytes_per_sec" in event:
             self.dashboard.set_transfer_rate(event.get("bytes_per_sec", 0), event.get("phase", "RED Wireless"))
         if "report_path" in event:
-            self.dashboard.latest_report_path = str(event.get("report_path") or "")
+            path = str(event.get("report_path") or "").strip()
+            if path:
+                self._current_reports.append(path)
+            self.dashboard.latest_report_path = path
             self.dashboard.open_report_btn.setEnabled(bool(self.dashboard.latest_report_path))
 
     def on_finished(self, ok):
         self.detect_btn.setEnabled(True); self.discover_btn.setEnabled(True); self.run_btn.setEnabled(bool(self.discovery and getattr(self.discovery, "ok", False)))
-        self.status_label.setText("Complete" if ok else "Finished with errors")
+        msg = "Complete" if ok else "Finished with errors"
+        self.status_label.setText(msg)
         self.maybe_play_finish_sound(ok)
         if self.dashboard:
-            self.dashboard.set_active_job("Complete" if ok else "Finished with errors", "RED Wireless Ingest", self.camera_ip.text().strip(), ", ".join(str(d[1]) for d in self.destinations()), self.progress_label.text())
+            self.dashboard.set_active_job(msg, "RED Wireless Ingest", self.camera_ip.text().strip(), ", ".join(str(d[1]) for d in self.destinations()), self.progress_label.text())
+        dispatch_completion_alert({
+            "status": msg,
+            "workflow": "RED Wireless Ingest",
+            "job": self._current_job_name,
+            "source": self._current_source,
+            "destinations": self._current_destinations,
+            "progress": self.progress_label.text(),
+            "reports": list(dict.fromkeys(self._current_reports)),
+        }, self.signals.log.emit)
 
     def on_scan_result(self, payload: dict):
         mode = str(payload.get("mode") or "")
@@ -3188,6 +3878,10 @@ class RedWirelessPage(QWidget, ActivityLogMixin):
                 self.signals.dest_status.emit(row, "—", "Missing"); self.status_label.setText(f"{role} unavailable"); self.handle_log(str(exc)); return
         self.run_btn.setEnabled(False); self.detect_btn.setEnabled(False); self.discover_btn.setEnabled(False); self.table.setRowCount(0); self.status_label.setText("Running")
         host = self.camera_ip.text().strip(); user, password = self._credentials(); use_ftps = self.protocol.currentIndex() == 0; port = int(self.port.value())
+        self._current_job_name = f"RED Wireless Reel {getattr(self.discovery, 'reel', '')}"
+        self._current_source = host
+        self._current_destinations = ", ".join(str(d[1]) for d in dests)
+        self._current_reports = []
         if self.dashboard:
             self.dashboard.set_active_job("Running", f"RED Wireless Reel {getattr(self.discovery, 'reel', '')}", host, ", ".join(str(d[1]) for d in dests), "0 / 0")
             self.dashboard.reset_destination_progress([{"role": role, "total": max(1, self.discovery.file_count)} for role, _dst, _row in dests])
@@ -4161,6 +4855,11 @@ class AppSettingsPage(QWidget):
     """General application preferences plus metadata tool discovery."""
     def __init__(self):
         super().__init__()
+        self.ingest_signals = WorkerSignals()
+        self.ingest_signals.log.connect(lambda text: log_to(self.throughput_console, text))
+        self.ingest_signals.status.connect(self._set_throughput_status)
+        self.ingest_signals.finished.connect(self._on_throughput_finished)
+        self._throughput_cancel_event = threading.Event()
         self._build_ui()
         self.load_config()
 
@@ -4190,7 +4889,7 @@ class AppSettingsPage(QWidget):
             out = {}
             for key, item in value.items():
                 key_text = str(key).lower()
-                if any(token in key_text for token in ("password", "secret", "token", "api_key", "apikey", "credential")):
+                if any(token in key_text for token in ("password", "secret", "token", "api_key", "apikey", "credential", "webhook")):
                     out[key] = "<redacted>"
                 else:
                     out[key] = self._redact_for_support(item)
@@ -4420,6 +5119,69 @@ Please do not attach camera originals unless explicitly requested.
         page_splitter.setHandleWidth(8)
         page_splitter.addWidget(general)
 
+        linux_panel, linux_v = panel("Linux Ingest")
+        ingest_hint = label(
+            "Tune multi-magazine CFexpress ingest. Destination throughput test writes temporary files only, fsyncs them, then deletes the test folder.",
+            "muted",
+        )
+        ingest_hint.setWordWrap(True)
+        linux_v.addWidget(ingest_hint)
+        ingest_grid = QGridLayout()
+        ingest_grid.setSpacing(10)
+        ingest_grid.addWidget(label("Max simultaneous magazines"), 0, 0)
+        self.max_magazines = QSpinBox()
+        self.max_magazines.setRange(1, 24)
+        ingest_grid.addWidget(self.max_magazines, 0, 1)
+        ingest_grid.addWidget(label("Threads per magazine"), 0, 2)
+        self.threads_per_magazine = QSpinBox()
+        self.threads_per_magazine.setRange(1, 8)
+        ingest_grid.addWidget(self.threads_per_magazine, 0, 3)
+        self.magazine_subfolders = QCheckBox("Create one destination subfolder per magazine")
+        self.magazine_subfolders.setChecked(True)
+        ingest_grid.addWidget(self.magazine_subfolders, 1, 0, 1, 4)
+        linux_v.addLayout(ingest_grid)
+
+        throughput_panel, throughput_v = panel("Destination Throughput Test")
+        throughput_grid = QGridLayout()
+        throughput_grid.setSpacing(10)
+        throughput_grid.addWidget(label("Destination"), 0, 0)
+        dest_widget, self.throughput_dest = path_picker("")
+        throughput_grid.addWidget(dest_widget, 0, 1, 1, 3)
+        self.throughput_dest.textChanged.connect(lambda _text: self.refresh_throughput_profile_status())
+        throughput_grid.addWidget(label("GiB per stream"), 1, 0)
+        self.throughput_size = QDoubleSpinBox()
+        self.throughput_size.setRange(0.1, 64.0)
+        self.throughput_size.setSingleStep(0.5)
+        self.throughput_size.setDecimals(1)
+        throughput_grid.addWidget(self.throughput_size, 1, 1)
+        throughput_grid.addWidget(label("Streams"), 1, 2)
+        self.throughput_counts = QLineEdit()
+        self.throughput_counts.setPlaceholderText("1,2,4,6,8,12")
+        throughput_grid.addWidget(self.throughput_counts, 1, 3)
+        throughput_v.addLayout(throughput_grid)
+        self.throughput_profile_status = label("No destination profile selected", "muted")
+        self.throughput_profile_status.setWordWrap(True)
+        throughput_v.addWidget(self.throughput_profile_status)
+        throughput_buttons = QHBoxLayout()
+        self.run_throughput_btn = QPushButton("Run Throughput Test")
+        self.run_throughput_btn.setObjectName("primary")
+        self.run_throughput_btn.clicked.connect(self.run_throughput_test)
+        self.cancel_throughput_btn = QPushButton("Stop Test")
+        self.cancel_throughput_btn.setEnabled(False)
+        self.cancel_throughput_btn.clicked.connect(self.stop_throughput_test)
+        self.throughput_status = label("Ready", "muted")
+        throughput_buttons.addWidget(self.run_throughput_btn)
+        throughput_buttons.addWidget(self.cancel_throughput_btn)
+        throughput_buttons.addWidget(self.throughput_status)
+        throughput_buttons.addStretch()
+        throughput_v.addLayout(throughput_buttons)
+        self.throughput_console = make_console()
+        self.throughput_console.setMinimumHeight(120)
+        self.throughput_console.setMaximumHeight(180)
+        throughput_v.addWidget(self.throughput_console)
+        linux_v.addWidget(throughput_panel)
+        page_splitter.addWidget(linux_panel)
+
         tools_panel, tools_v = panel("Metadata Tools")
         tool_hint = label(
             "Configure optional command-line tools used by the Metadata page. "
@@ -4486,8 +5248,9 @@ Please do not attach camera originals unless explicitly requested.
 
         page_splitter.setStretchFactor(0, 0)
         page_splitter.setStretchFactor(1, 1)
-        page_splitter.setStretchFactor(2, 0)
-        page_splitter.setSizes([110, 520, 180])
+        page_splitter.setStretchFactor(2, 1)
+        page_splitter.setStretchFactor(3, 0)
+        page_splitter.setSizes([110, 360, 440, 180])
         root.addWidget(page_splitter, 1)
 
     def browse_executable(self, edit: QLineEdit):
@@ -4553,15 +5316,175 @@ Please do not attach camera originals unless explicitly requested.
         target.mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
 
+    def _profile_summary_text(self, profile: dict | None) -> str:
+        if not profile:
+            return "No saved profile for this destination."
+        peak = self._throughput_rate_text(profile.get("peak_bytes_per_second", 0))
+        updated = str(profile.get("updated_at", "") or "unknown time")
+        return (
+            f"Saved profile: {profile.get('label', 'Destination')} - "
+            f"{profile.get('max_simultaneous_magazines', '?')} magazines, "
+            f"{profile.get('threads_per_magazine', '?')} thread/mag, "
+            f"peak {peak}, updated {updated}."
+        )
+
+    def refresh_throughput_profile_status(self):
+        if not hasattr(self, "throughput_profile_status"):
+            return
+        text = self.throughput_dest.text().strip()
+        if not text:
+            self.throughput_profile_status.setText("No destination profile selected")
+            return
+        try:
+            from mediarunner_core import load_network_config
+            from mediarunner_linux_ingest import profile_for_destination
+            profile = profile_for_destination(load_network_config(), Path(text).expanduser())
+            self.throughput_profile_status.setText(self._profile_summary_text(profile))
+        except Exception as exc:
+            self.throughput_profile_status.setText(f"Profile lookup failed: {exc}")
+
+    def _set_throughput_status(self, text: str):
+        self.throughput_status.setText(str(text or ""))
+
+    def _on_throughput_finished(self, ok: bool):
+        self.run_throughput_btn.setEnabled(True)
+        self.cancel_throughput_btn.setEnabled(False)
+        recommendation = int(getattr(self, "_last_throughput_recommendation", 0) or 0)
+        if ok and recommendation:
+            self.max_magazines.setValue(recommendation)
+            self.throughput_status.setText(f"Saved profile: {recommendation} magazine(s)")
+            self.refresh_throughput_profile_status()
+        elif self._throughput_cancel_event.is_set():
+            self.throughput_status.setText("Stopped")
+        elif not ok:
+            self.throughput_status.setText("Test failed")
+        else:
+            self.throughput_status.setText("Complete")
+
+    @staticmethod
+    def _throughput_rate_text(bytes_per_second: float | int) -> str:
+        try:
+            bps = float(bytes_per_second or 0)
+        except Exception:
+            bps = 0.0
+        if bps <= 0:
+            return "0 MB/s"
+        mib = bps / (1024 * 1024)
+        gib = bps / (1024 * 1024 * 1024)
+        if gib >= 1.0:
+            return f"{gib:.2f} GiB/s"
+        return f"{mib:.0f} MiB/s"
+
+    def run_throughput_test(self):
+        destination = Path(self.throughput_dest.text().strip()).expanduser()
+        if not str(destination).strip():
+            self.throughput_status.setText("Destination required")
+            return
+        try:
+            counts_text = self.throughput_counts.text().strip()
+            from mediarunner_linux_ingest import parse_worker_counts
+            counts = parse_worker_counts(counts_text)
+        except Exception as exc:
+            self.throughput_status.setText(f"Invalid streams: {exc}")
+            return
+        gib_per_worker = float(self.throughput_size.value() or 1.0)
+        bytes_per_worker = int(gib_per_worker * 1024 * 1024 * 1024)
+        threads_for_profile = int(self.threads_per_magazine.value() or 1)
+        self._last_throughput_recommendation = 0
+        self._throughput_cancel_event.clear()
+        self.run_throughput_btn.setEnabled(False)
+        self.cancel_throughput_btn.setEnabled(True)
+        self.throughput_console.clear()
+        self.throughput_status.setText("Running")
+        sig = self.ingest_signals
+
+        def work():
+            ok = False
+            try:
+                from mediarunner_core import load_network_config, save_network_config
+                from mediarunner_linux_ingest import (
+                    run_destination_throughput_test,
+                    recommend_worker_count,
+                    build_destination_profile,
+                )
+                sig.log.emit(f"Destination: {destination}")
+                sig.log.emit(f"Streams: {', '.join(str(c) for c in counts)}")
+                sig.log.emit(f"Test size: {gib_per_worker:.1f} GiB per stream")
+
+                def on_result(result):
+                    if result.error:
+                        sig.log.emit(f"{result.workers} stream(s): ERROR - {result.error}")
+                        return
+                    per_stream = result.bytes_per_second / max(1, result.workers)
+                    sig.log.emit(
+                        f"{result.workers} stream(s): {self._throughput_rate_text(result.bytes_per_second)} aggregate "
+                        f"({self._throughput_rate_text(per_stream)} per stream, {result.elapsed_seconds:.1f}s)"
+                    )
+
+                results = run_destination_throughput_test(
+                    destination,
+                    worker_counts=counts,
+                    bytes_per_worker=bytes_per_worker,
+                    progress_callback=on_result,
+                    status_callback=sig.status.emit,
+                    cancel_check=self._throughput_cancel_event.is_set,
+                )
+                good = [r for r in results if not r.error and r.bytes_per_second > 0]
+                if good:
+                    rec = recommend_worker_count(good)
+                    best = max(good, key=lambda r: r.bytes_per_second)
+                    self._last_throughput_recommendation = rec
+                    profile = build_destination_profile(
+                        destination,
+                        results,
+                        recommended_workers=rec,
+                        threads_per_magazine=threads_for_profile,
+                        throughput_gib_per_worker=gib_per_worker,
+                        worker_counts=counts,
+                    )
+                    cfg = load_network_config()
+                    profiles = dict(cfg.get("linux_destination_profiles") or {})
+                    profiles[profile["key"]] = profile
+                    cfg["linux_destination_profiles"] = profiles
+                    cfg["linux_max_simultaneous_magazines"] = rec
+                    cfg["linux_threads_per_magazine"] = profile["threads_per_magazine"]
+                    cfg["linux_throughput_worker_counts"] = ",".join(str(c) for c in counts)
+                    cfg["linux_throughput_gib_per_worker"] = gib_per_worker
+                    save_network_config(cfg)
+                    sig.log.emit(f"Peak observed: {best.workers} stream(s) at {self._throughput_rate_text(best.bytes_per_second)}")
+                    sig.log.emit(f"Recommended max simultaneous magazines: {rec}")
+                    sig.log.emit(f"Saved destination profile: {profile['label']}")
+                    ok = True
+                elif self._throughput_cancel_event.is_set():
+                    sig.log.emit("Throughput test stopped.")
+                else:
+                    sig.log.emit("No successful throughput samples.")
+            except Exception as exc:
+                sig.log.emit(f"Throughput test failed: {exc}")
+            finally:
+                sig.finished.emit(ok)
+
+        threading.Thread(target=work, daemon=True, name="mediarunner-throughput-test").start()
+
+    def stop_throughput_test(self):
+        self._throughput_cancel_event.set()
+        self.throughput_status.setText("Stopping...")
+
     def load_config(self):
         from mediarunner_core import load_network_config
         cfg = load_network_config()
         self.finish_sound.setChecked(bool(cfg.get("finish_sound", True)))
         self.log_dir_edit.setText(str(cfg.get("log_dir", "") or ""))
+        self.max_magazines.setValue(int(cfg.get("linux_max_simultaneous_magazines", 6) or 6))
+        self.threads_per_magazine.setValue(int(cfg.get("linux_threads_per_magazine", 1) or 1))
+        self.magazine_subfolders.setChecked(bool(cfg.get("linux_stage_magazine_subfolders", True)))
+        self.throughput_counts.setText(str(cfg.get("linux_throughput_worker_counts", "1,2,4,6,8,12") or "1,2,4,6,8,12"))
+        self.throughput_size.setValue(float(cfg.get("linux_throughput_gib_per_worker", 1.0) or 1.0))
         self.redline_path.setText(str(cfg.get("redline_path", "") or ""))
         self.ffmpeg_path.setText(str(cfg.get("ffmpeg_path", "") or ""))
         self.ffprobe_path.setText(str(cfg.get("ffprobe_path", "") or ""))
         self.exiftool_path.setText(str(cfg.get("exiftool_path", "") or ""))
+        self.refresh_throughput_profile_status()
         self.refresh_tool_status()
 
     def _merged_config(self) -> dict:
@@ -4570,6 +5493,11 @@ Please do not attach camera originals unless explicitly requested.
         cfg.update({
             "finish_sound": self.finish_sound.isChecked(),
             "log_dir": self.log_dir_edit.text().strip(),
+            "linux_max_simultaneous_magazines": self.max_magazines.value(),
+            "linux_threads_per_magazine": self.threads_per_magazine.value(),
+            "linux_stage_magazine_subfolders": self.magazine_subfolders.isChecked(),
+            "linux_throughput_worker_counts": self.throughput_counts.text().strip() or "1,2,4,6,8,12",
+            "linux_throughput_gib_per_worker": float(self.throughput_size.value() or 1.0),
             "redline_path": self.redline_path.text().strip(),
             "ffmpeg_path": self.ffmpeg_path.text().strip(),
             "ffprobe_path": self.ffprobe_path.text().strip(),
@@ -4588,6 +5516,11 @@ Please do not attach camera originals unless explicitly requested.
 
     def restore_defaults(self):
         self.finish_sound.setChecked(True)
+        self.max_magazines.setValue(6)
+        self.threads_per_magazine.setValue(1)
+        self.magazine_subfolders.setChecked(True)
+        self.throughput_counts.setText("1,2,4,6,8,12")
+        self.throughput_size.setValue(1.0)
         self.redline_path.clear()
         self.ffmpeg_path.clear()
         self.ffprobe_path.clear()
@@ -4622,6 +5555,213 @@ Please do not attach camera originals unless explicitly requested.
 
     def finish_sound_enabled(self):
         return bool(self.finish_sound.isChecked())
+
+
+class AlertsPage(QWidget):
+    """Email and Google Chat completion alerts."""
+    def __init__(self):
+        super().__init__()
+        self.signals = WorkerSignals()
+        self.signals.status.connect(self._set_status)
+        self.signals.finished.connect(self._on_test_finished)
+        self._build_ui()
+        self.load_config()
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(14)
+
+        splitter = QSplitter(Qt.Vertical)
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(8)
+
+        triggers_panel, triggers = panel("Alert Triggers")
+        self.notify_success = QCheckBox("Transfer completes successfully")
+        self.notify_failure = QCheckBox("Transfer finishes with errors")
+        self.notify_cancelled = QCheckBox("Transfer is cancelled")
+        for checkbox in (self.notify_success, self.notify_failure, self.notify_cancelled):
+            checkbox.setChecked(True)
+            triggers.addWidget(checkbox)
+        triggers.addWidget(label("Alerts are sent after Offload, FTP Camera Array, and RED Wireless jobs finish. Alert failures are logged but never change transfer results.", "muted"))
+        splitter.addWidget(triggers_panel)
+
+        email_panel, email = panel("Email")
+        self.email_enabled = QCheckBox("Enable email alerts")
+        email.addWidget(self.email_enabled)
+        eg = QGridLayout()
+        eg.setHorizontalSpacing(10)
+        eg.setVerticalSpacing(8)
+        eg.setColumnStretch(1, 1)
+        eg.setColumnStretch(3, 1)
+        self.smtp_host = QLineEdit()
+        self.smtp_host.setPlaceholderText("smtp.example.com")
+        self.smtp_port = QSpinBox()
+        self.smtp_port.setRange(1, 65535)
+        self.smtp_port.setValue(587)
+        self.smtp_security = QComboBox()
+        self.smtp_security.addItems(["STARTTLS", "SSL/TLS", "None"])
+        self.smtp_username = QLineEdit()
+        self.smtp_username.setPlaceholderText("Optional")
+        self.smtp_password = QLineEdit()
+        self.smtp_password.setEchoMode(QLineEdit.Password)
+        self.smtp_password.setPlaceholderText("Optional app password")
+        self.email_from = QLineEdit()
+        self.email_from.setPlaceholderText("alerts@example.com")
+        self.email_to = QLineEdit()
+        self.email_to.setPlaceholderText("recipient@example.com, another@example.com")
+        self.email_subject_prefix = QLineEdit()
+        self.email_subject_prefix.setPlaceholderText("MediaRunner")
+        eg.addWidget(label("SMTP host"), 0, 0); eg.addWidget(self.smtp_host, 0, 1)
+        eg.addWidget(label("Port"), 0, 2); eg.addWidget(self.smtp_port, 0, 3)
+        eg.addWidget(label("Security"), 1, 0); eg.addWidget(self.smtp_security, 1, 1)
+        eg.addWidget(label("Username"), 1, 2); eg.addWidget(self.smtp_username, 1, 3)
+        eg.addWidget(label("Password"), 2, 0); eg.addWidget(self.smtp_password, 2, 1)
+        eg.addWidget(label("From"), 2, 2); eg.addWidget(self.email_from, 2, 3)
+        eg.addWidget(label("To"), 3, 0); eg.addWidget(self.email_to, 3, 1, 1, 3)
+        eg.addWidget(label("Subject prefix"), 4, 0); eg.addWidget(self.email_subject_prefix, 4, 1, 1, 3)
+        email.addLayout(eg)
+        email.addWidget(label("SMTP credentials are saved in the local MediaRunner config. Use a dedicated app password where possible.", "muted"))
+        splitter.addWidget(email_panel)
+
+        chat_panel, chat = panel("Google Chat")
+        self.gchat_enabled = QCheckBox("Enable Google Chat alerts")
+        chat.addWidget(self.gchat_enabled)
+        chat_row = QHBoxLayout()
+        chat_row.addWidget(label("Webhook URL"))
+        self.gchat_webhook = QLineEdit()
+        self.gchat_webhook.setEchoMode(QLineEdit.Password)
+        self.gchat_webhook.setPlaceholderText("Google Chat incoming webhook URL")
+        chat_row.addWidget(self.gchat_webhook, 1)
+        chat.addLayout(chat_row)
+        chat.addWidget(label("Create an incoming webhook in the target Google Chat space and paste it here. The URL is treated as a secret.", "muted"))
+        splitter.addWidget(chat_panel)
+
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(2, 0)
+        splitter.setSizes([140, 410, 160])
+        root.addWidget(splitter, 1)
+
+        buttons = QHBoxLayout()
+        self.test_btn = QPushButton("Send Test")
+        self.test_btn.setObjectName("primary")
+        self.test_btn.clicked.connect(self.send_test)
+        save = QPushButton("Save Alerts")
+        save.clicked.connect(self.save)
+        defaults = QPushButton("Restore Defaults")
+        defaults.clicked.connect(self.restore_defaults)
+        self.status = label("Ready", "muted")
+        buttons.addWidget(self.test_btn)
+        buttons.addWidget(save)
+        buttons.addWidget(self.status)
+        buttons.addStretch()
+        buttons.addWidget(defaults)
+        root.addLayout(buttons)
+
+    def _set_status(self, text: str):
+        self.status.setText(str(text or ""))
+
+    def _on_test_finished(self, _ok: bool):
+        self.test_btn.setEnabled(True)
+
+    def load_config(self):
+        from mediarunner_core import load_network_config
+        cfg = load_network_config()
+        self.notify_success.setChecked(bool(cfg.get("alerts_notify_success", True)))
+        self.notify_failure.setChecked(bool(cfg.get("alerts_notify_failure", True)))
+        self.notify_cancelled.setChecked(bool(cfg.get("alerts_notify_cancelled", True)))
+        self.email_enabled.setChecked(bool(cfg.get("alerts_email_enabled", False)))
+        self.smtp_host.setText(str(cfg.get("alerts_smtp_host", "") or ""))
+        self.smtp_port.setValue(int(cfg.get("alerts_smtp_port", 587) or 587))
+        security = str(cfg.get("alerts_smtp_security", "STARTTLS") or "STARTTLS")
+        ix = self.smtp_security.findText(security)
+        self.smtp_security.setCurrentIndex(ix if ix >= 0 else 0)
+        self.smtp_username.setText(str(cfg.get("alerts_smtp_username", "") or ""))
+        self.smtp_password.setText(str(cfg.get("alerts_smtp_password", "") or ""))
+        self.email_from.setText(str(cfg.get("alerts_email_from", "") or ""))
+        self.email_to.setText(str(cfg.get("alerts_email_to", "") or ""))
+        self.email_subject_prefix.setText(str(cfg.get("alerts_email_subject_prefix", "MediaRunner") or "MediaRunner"))
+        self.gchat_enabled.setChecked(bool(cfg.get("alerts_gchat_enabled", False)))
+        self.gchat_webhook.setText(str(cfg.get("alerts_gchat_webhook_url", "") or ""))
+
+    def _merged_config(self) -> dict:
+        from mediarunner_core import load_network_config, apply_network_config
+        cfg = load_network_config()
+        cfg.update({
+            "alerts_notify_success": self.notify_success.isChecked(),
+            "alerts_notify_failure": self.notify_failure.isChecked(),
+            "alerts_notify_cancelled": self.notify_cancelled.isChecked(),
+            "alerts_email_enabled": self.email_enabled.isChecked(),
+            "alerts_smtp_host": self.smtp_host.text().strip(),
+            "alerts_smtp_port": self.smtp_port.value(),
+            "alerts_smtp_security": self.smtp_security.currentText(),
+            "alerts_smtp_username": self.smtp_username.text().strip(),
+            "alerts_smtp_password": self.smtp_password.text(),
+            "alerts_email_from": self.email_from.text().strip(),
+            "alerts_email_to": self.email_to.text().strip(),
+            "alerts_email_subject_prefix": self.email_subject_prefix.text().strip() or "MediaRunner",
+            "alerts_gchat_enabled": self.gchat_enabled.isChecked(),
+            "alerts_gchat_webhook_url": self.gchat_webhook.text().strip(),
+        })
+        return apply_network_config(cfg)
+
+    def get_config(self):
+        return self._merged_config()
+
+    def save(self):
+        from mediarunner_core import save_network_config
+        path = save_network_config(self._merged_config())
+        self.status.setText(f"Saved: {path}")
+
+    def restore_defaults(self):
+        self.notify_success.setChecked(True)
+        self.notify_failure.setChecked(True)
+        self.notify_cancelled.setChecked(True)
+        self.email_enabled.setChecked(False)
+        self.smtp_host.clear()
+        self.smtp_port.setValue(587)
+        self.smtp_security.setCurrentIndex(0)
+        self.smtp_username.clear()
+        self.smtp_password.clear()
+        self.email_from.clear()
+        self.email_to.clear()
+        self.email_subject_prefix.setText("MediaRunner")
+        self.gchat_enabled.setChecked(False)
+        self.gchat_webhook.clear()
+        self.status.setText("Defaults loaded")
+
+    def send_test(self):
+        cfg = self._merged_config()
+        if not cfg.get("alerts_email_enabled") and not cfg.get("alerts_gchat_enabled"):
+            self.status.setText("Enable Email or Google Chat before sending a test")
+            return
+        self.test_btn.setEnabled(False)
+        self.status.setText("Sending test alert…")
+        sig = self.signals
+
+        def work():
+            try:
+                from mediarunner_notifications import send_test_alerts
+                results = send_test_alerts(cfg)
+                if not results:
+                    sig.status.emit("No alert provider enabled")
+                    sig.finished.emit(False)
+                    return
+                failures = [r for r in results if r.get("status") != "sent"]
+                if failures:
+                    detail = "; ".join(f"{r.get('provider')}: {r.get('message')}" for r in failures)
+                    sig.status.emit(f"Test alert failed: {detail}")
+                    sig.finished.emit(False)
+                    return
+                providers = ", ".join(r.get("provider", "Alert") for r in results)
+                sig.status.emit(f"Test alert sent: {providers}")
+                sig.finished.emit(True)
+            except Exception as exc:
+                sig.status.emit(f"Test alert failed: {exc}")
+                sig.finished.emit(False)
+
+        threading.Thread(target=work, daemon=True, name="mediarunner-alert-test").start()
 
 
 class FTPSettingsPage(QWidget):
@@ -4784,9 +5924,14 @@ class FTPSettingsPage(QWidget):
         from mediarunner_core import default_network_config, load_network_config
         defaults = default_network_config()
         current = load_network_config()
-        # Preserve non-FTP app preferences from the dedicated Settings page.
-        for key in ("finish_sound", "redline_path", "ffmpeg_path", "ffprobe_path", "exiftool_path"):
-            defaults[key] = current.get(key, defaults.get(key, ""))
+        # Preserve non-networking app preferences from Settings/Alerts.
+        networking_keys = {
+            "ftp_user", "ftp_pass", "ftp_port", "rcp2_port", "rcp2_udp_port",
+            "ftp_timeout", "scan_threads", "skip_offline", "cameras",
+        }
+        for key, value in current.items():
+            if key not in networking_keys:
+                defaults[key] = value
         self.user.setText(str(defaults.get("ftp_user", "ftp1")))
         self.password.setText(str(defaults.get("ftp_pass", "")))
         self.port.setValue(int(defaults.get("ftp_port", 21)))
@@ -5002,12 +6147,12 @@ class MediaRunnerWindow(QMainWindow):
         brand_row.addLayout(brand_text); brand_row.addStretch()
         sv.addLayout(brand_row)
         self.nav_buttons=[]; self.stack=QStackedWidget()
-        self.dashboard=DashboardPage(); self.app_settings=AppSettingsPage(); self.settings=FTPSettingsPage(); self.transfer=TransferPage(self.dashboard, lambda: self.show_page(0), self.app_settings); self.ftp=FTPPage(self.settings, self.dashboard, lambda: self.show_page(0), self.app_settings); self.red_wireless=RedWirelessPage(self.settings, self.dashboard, lambda: self.show_page(0), self.app_settings); self.metadata=MetadataPage(); self.reports=ReportsPage(); self.validation=ValidationPage()
+        self.dashboard=DashboardPage(); self.app_settings=AppSettingsPage(); self.alerts=AlertsPage(); self.settings=FTPSettingsPage(); self.transfer=TransferPage(self.dashboard, lambda: self.show_page(0), self.app_settings); self.ftp=FTPPage(self.settings, self.dashboard, lambda: self.show_page(0), self.app_settings); self.red_wireless=RedWirelessPage(self.settings, self.dashboard, lambda: self.show_page(0), self.app_settings); self.metadata=MetadataPage(); self.reports=ReportsPage(); self.validation=ValidationPage()
         self.ftp_unified = FTPUnifiedPage(self.ftp, self.red_wireless)
         self.dashboard.stop_callback = self.request_stop
         self.settings.signals.scan_result.connect(self.dashboard.update_ftp_camera_count)
         self.ftp.signals.scan_result.connect(self.dashboard.update_ftp_camera_count)
-        pages=[("Dashboard", self.dashboard), ("Offload", self.transfer), ("FTP", self.ftp_unified), ("Metadata", self.metadata), ("Reports", self.reports), ("Networking", self.settings), ("Settings", self.app_settings), ("Validation", self.validation)]
+        pages=[("Dashboard", self.dashboard), ("Offload", self.transfer), ("FTP", self.ftp_unified), ("Metadata", self.metadata), ("Reports", self.reports), ("Networking", self.settings), ("Settings", self.app_settings), ("Alerts", self.alerts), ("Validation", self.validation)]
         for idx,(title,page) in enumerate(pages):
             btn=QPushButton(title); btn.setObjectName("nav_active" if idx==0 else "nav"); btn.clicked.connect(lambda checked=False, i=idx: self.show_page(i)); sv.addWidget(btn); self.nav_buttons.append(btn); self.stack.addWidget(page)
             if title == "Validation":

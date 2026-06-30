@@ -44,6 +44,8 @@ env PYINSTALLER_CONFIG_DIR="$PWD/.pyinstaller-cache" nice -n 10 python3 -m PyIns
   --add-data "mediarunner_red_wireless.py:." \
   --add-data "mediarunner_mhl.py:." \
   --add-data "mediarunner_logging.py:." \
+  --add-data "mediarunner_notifications.py:." \
+  --add-data "mediarunner_linux_ingest.py:." \
   mediarunner_gui.py
 
 echo "Build complete: dist/${APP_NAME}.app"

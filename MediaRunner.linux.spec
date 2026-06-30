@@ -19,6 +19,8 @@ a = Analysis(
         ("mediarunner_red_wireless.py", "."),
         ("mediarunner_mhl.py", "."),
         ("mediarunner_logging.py", "."),
+        ("mediarunner_notifications.py", "."),
+        ("mediarunner_linux_ingest.py", "."),
         ("README.md", "."),
         ("PACKAGE_NOTES.md", "."),
         ("requirements.txt", "."),

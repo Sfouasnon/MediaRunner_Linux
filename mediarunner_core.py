@@ -137,6 +137,26 @@ def default_network_config() -> dict:
         "ffmpeg_path": "",
         "ffprobe_path": "",
         "exiftool_path": "",
+        "alerts_notify_success": True,
+        "alerts_notify_failure": True,
+        "alerts_notify_cancelled": True,
+        "alerts_email_enabled": False,
+        "alerts_smtp_host": "",
+        "alerts_smtp_port": 587,
+        "alerts_smtp_security": "STARTTLS",
+        "alerts_smtp_username": "",
+        "alerts_smtp_password": "",
+        "alerts_email_from": "",
+        "alerts_email_to": "",
+        "alerts_email_subject_prefix": "MediaRunner",
+        "alerts_gchat_enabled": False,
+        "alerts_gchat_webhook_url": "",
+        "linux_max_simultaneous_magazines": 6,
+        "linux_threads_per_magazine": 1,
+        "linux_stage_magazine_subfolders": True,
+        "linux_throughput_worker_counts": "1,2,4,6,8,12",
+        "linux_throughput_gib_per_worker": 1.0,
+        "linux_destination_profiles": {},
         "cameras": dict(DEFAULT_CAMERAS),
     }
 
@@ -154,7 +174,79 @@ def _normalize_network_config(cfg: Optional[dict]) -> dict:
     base["scan_threads"] = max(1, int(base.get("scan_threads") or 24))
     base["skip_offline"] = bool(base.get("skip_offline", True))
     base["finish_sound"] = bool(base.get("finish_sound", True))
-    for key in ("redline_path", "ffmpeg_path", "ffprobe_path", "exiftool_path", "log_dir"):
+    base["linux_max_simultaneous_magazines"] = max(1, min(24, int(base.get("linux_max_simultaneous_magazines") or 6)))
+    base["linux_threads_per_magazine"] = max(1, min(8, int(base.get("linux_threads_per_magazine") or 1)))
+    base["linux_stage_magazine_subfolders"] = bool(base.get("linux_stage_magazine_subfolders", True))
+    try:
+        base["linux_throughput_gib_per_worker"] = max(0.1, min(64.0, float(base.get("linux_throughput_gib_per_worker") or 1.0)))
+    except (TypeError, ValueError):
+        base["linux_throughput_gib_per_worker"] = 1.0
+    raw_profiles = base.get("linux_destination_profiles")
+    profiles = {}
+    if isinstance(raw_profiles, dict):
+        for raw_key, raw_profile in raw_profiles.items():
+            if not isinstance(raw_profile, dict):
+                continue
+            profile = dict(raw_profile)
+            key = str(profile.get("key") or raw_key or "").strip()
+            path = str(profile.get("path") or key or "").strip()
+            if not key and path:
+                key = path
+            if not key:
+                continue
+            profile["key"] = key
+            profile["path"] = path or key
+            profile["label"] = str(profile.get("label") or Path(profile["path"]).name or profile["path"]).strip()
+            profile["updated_at"] = str(profile.get("updated_at", "") or "").strip()
+            try:
+                profile["max_simultaneous_magazines"] = max(1, min(24, int(profile.get("max_simultaneous_magazines") or base["linux_max_simultaneous_magazines"])))
+            except (TypeError, ValueError):
+                profile["max_simultaneous_magazines"] = base["linux_max_simultaneous_magazines"]
+            try:
+                profile["threads_per_magazine"] = max(1, min(8, int(profile.get("threads_per_magazine") or base["linux_threads_per_magazine"])))
+            except (TypeError, ValueError):
+                profile["threads_per_magazine"] = base["linux_threads_per_magazine"]
+            try:
+                profile["throughput_gib_per_worker"] = max(0.1, min(64.0, float(profile.get("throughput_gib_per_worker") or base["linux_throughput_gib_per_worker"])))
+            except (TypeError, ValueError):
+                profile["throughput_gib_per_worker"] = base["linux_throughput_gib_per_worker"]
+            profile["throughput_worker_counts"] = str(profile.get("throughput_worker_counts") or base.get("linux_throughput_worker_counts") or "1,2,4,6,8,12").strip()
+            try:
+                profile["best_workers"] = max(0, int(profile.get("best_workers") or 0))
+            except (TypeError, ValueError):
+                profile["best_workers"] = 0
+            try:
+                profile["peak_bytes_per_second"] = max(0.0, float(profile.get("peak_bytes_per_second") or 0.0))
+            except (TypeError, ValueError):
+                profile["peak_bytes_per_second"] = 0.0
+            clean_results = []
+            for row in profile.get("results") or []:
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    clean_results.append({
+                        "workers": max(1, int(row.get("workers") or 1)),
+                        "bytes_written": max(0, int(row.get("bytes_written") or 0)),
+                        "elapsed_seconds": max(0.0, float(row.get("elapsed_seconds") or 0.0)),
+                        "bytes_per_second": max(0.0, float(row.get("bytes_per_second") or 0.0)),
+                        "files_written": max(0, int(row.get("files_written") or 0)),
+                        "error": str(row.get("error", "") or ""),
+                    })
+                except (TypeError, ValueError):
+                    continue
+            profile["results"] = clean_results[:32]
+            profiles[key] = profile
+    base["linux_destination_profiles"] = profiles
+    for key in ("alerts_notify_success", "alerts_notify_failure", "alerts_notify_cancelled", "alerts_email_enabled", "alerts_gchat_enabled"):
+        base[key] = bool(base.get(key, False))
+    base["alerts_smtp_port"] = int(base.get("alerts_smtp_port") or 587)
+    for key in (
+        "redline_path", "ffmpeg_path", "ffprobe_path", "exiftool_path", "log_dir",
+        "linux_throughput_worker_counts",
+        "alerts_smtp_host", "alerts_smtp_security", "alerts_smtp_username",
+        "alerts_smtp_password", "alerts_email_from", "alerts_email_to",
+        "alerts_email_subject_prefix", "alerts_gchat_webhook_url",
+    ):
         base[key] = str(base.get(key, "") or "").strip()
     return base
 

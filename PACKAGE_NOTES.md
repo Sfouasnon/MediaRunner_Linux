@@ -29,6 +29,8 @@ under sustained high-resolution, multi-destination transfers.
 
 - Byte-based live progress bar (smooth during large files), payload preview on source selection, em-dash for empty report fields, root-level files no longer leak the filename into the Camera column.
 - Settings: configurable log folder + Open Logs; engineering password gate — the Validation page is hidden until unlocked (salted sha256 hash in config, re-locks on relaunch).
+- Alerts: optional SMTP email and Google Chat webhook notifications for Offload, FTP Camera Array, and RED Wireless completion states.
+- Linux ingest: Offload now has Multi-Mag source mode for concurrent CFexpress magazine jobs; Settings adds Linux Ingest limits plus a safe destination throughput test that saves per-destination profiles and applies them automatically.
 - **Field-stress harness** (`--profile stress-field`, needs `pip3 install pyftpdlib`): fault-injection FTP server (drop / stall / REST-reject), SIGKILL crash-atomicity test, ENOSPC injection, cancellation fuzzer. See TEST_MATRIX.md.
 - Fixed: `transfer_file` no longer swallows `FatalTransferError` (disk-full now aborts the whole job on every code path).
 - `design/MediaRunner_UI_Concept.html` — clickable production-grade UI concept (unified FTP page, engineering-locked diagnostics).

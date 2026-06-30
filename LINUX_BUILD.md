@@ -48,6 +48,19 @@ dist/MediaRunner-linux-amd64.tar.gz
 
 ## Linux runtime notes
 
+Multi-magazine ingest workflow:
+
+```text
+Settings -> Linux Ingest -> Destination Throughput Test
+Offload -> Source Mode: Multi-Mag -> Detect Mounted or Add Magazine
+```
+
+The throughput test writes temporary files under `.mediarunner_throughput_test`,
+fsyncs them, reports aggregate stream throughput, then removes the test folder.
+It saves a destination profile in the local MediaRunner config. Multi-Mag
+Offload applies matching destination profiles automatically; with multiple
+destinations selected, the most conservative profile caps magazine concurrency.
+
 The first Linux build should be validated on the target distro with:
 
 ```bash
