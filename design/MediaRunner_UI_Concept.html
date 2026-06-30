@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MediaRunner — UI Concept v0.3.1</title>
+<style>
+  :root{
+    --bg:#0B1117; --bg2:#0E1620; --panel:#121C26; --panel2:#16222E; --line:#233442;
+    --text:#DCE7EF; --muted:#7E93A4; --accent:#5AC8E6; --accent2:#3BA8C9;
+    --green:#35E37A; --amber:#E3B15F; --red:#E87979; --orange:#F5A348;
+    --mono:"SF Mono",ui-monospace,Menlo,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font:14px/1.45 -apple-system,"Helvetica Neue",Helvetica,Arial,sans-serif;height:100vh;overflow:hidden}
+  .app{display:grid;grid-template-columns:232px 1fr;height:100vh}
+
+  /* ── Sidebar ─────────────────────────────── */
+  .side{background:var(--bg2);border-right:1px solid var(--line);display:flex;flex-direction:column;padding:18px 14px}
+  .brand{display:flex;align-items:center;gap:10px;padding:4px 8px 16px}
+  .mark{width:34px;height:34px;border-radius:8px;background:linear-gradient(135deg,var(--accent),#2D7FA0);display:flex;align-items:center;justify-content:center;font-weight:900;color:#06121A;font-size:15px;letter-spacing:-.5px}
+  .brand b{font-size:16px;letter-spacing:.2px}
+  .brand span{display:block;font-size:10.5px;color:var(--muted)}
+  nav{display:flex;flex-direction:column;gap:3px;margin-top:6px}
+  nav a{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:8px;color:var(--muted);text-decoration:none;font-weight:600;font-size:13.5px;cursor:pointer}
+  nav a:hover{background:#15202C;color:var(--text)}
+  nav a.on{background:#173041;color:var(--accent)}
+  .side .foot{margin-top:auto;padding:10px 8px;font-size:11px;color:var(--muted)}
+  .runningpill{display:flex;align-items:center;gap:8px;margin:14px 8px 0;padding:9px 12px;border:1px solid #1E4A39;border-radius:9px;background:#0A1A14;font-size:12px;color:var(--green);font-weight:700;visibility:hidden}
+  .runningpill .dot{width:7px;height:7px;border-radius:50%;background:var(--green);animation:pulse 1.2s infinite}
+  @keyframes pulse{50%{opacity:.3}}
+
+  /* ── Main ────────────────────────────────── */
+  .main{display:flex;flex-direction:column;overflow:hidden}
+  .top{display:flex;align-items:center;gap:16px;padding:14px 26px;border-bottom:1px solid var(--line)}
+  .top h1{font-size:17px;font-weight:800}
+  .top .clock{margin-left:auto;font-family:var(--mono);font-size:13px;color:var(--muted)}
+  .pages{flex:1;overflow:auto;padding:22px 26px}
+  .page{display:none;max-width:1280px}
+  .page.on{display:block}
+
+  .grid{display:grid;gap:14px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px}
+  .panel h3{font-size:11.5px;text-transform:uppercase;letter-spacing:.12em;color:var(--muted);margin-bottom:12px}
+  .row{display:flex;align-items:center;gap:10px}
+  .sp{flex:1}
+  .kpi{font-size:26px;font-weight:900}
+  .kpi small{font-size:12px;color:var(--muted);font-weight:600;display:block;margin-top:2px}
+  .mono{font-family:var(--mono)}
+  .muted{color:var(--muted)}
+
+  .btn{background:#243444;color:var(--text);border:1px solid #2E4254;border-radius:8px;padding:8px 16px;font-weight:700;font-size:13px;cursor:pointer}
+  .btn:hover{background:#2C4053}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:#06121A}
+  .btn.primary:hover{background:#74D4EE}
+  .btn.danger{background:transparent;border-color:#5A3030;color:var(--red)}
+  .btn.big{padding:12px 26px;font-size:14px;border-radius:10px}
+  .btn:disabled{opacity:.4;cursor:default}
+
+  .chip{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:20px;font-size:11.5px;font-weight:800}
+  .chip.ok{background:#0A1F15;color:var(--green);border:1px solid #1E4A39}
+  .chip.warn{background:#241B0C;color:var(--amber);border:1px solid #4A3D1E}
+  .chip.fail{background:#240F0F;color:var(--red);border:1px solid #4A2424}
+  .chip.run{background:#0C1F28;color:var(--accent);border:1px solid #1E3F4A}
+
+  .bar{height:9px;border-radius:6px;background:#0A141D;overflow:hidden;border:1px solid #1B2A38}
+  .bar i{display:block;height:100%;width:0%;background:linear-gradient(90deg,var(--accent2),var(--accent));border-radius:6px;transition:width .25s linear}
+  .bar.green i{background:linear-gradient(90deg,#1F9D55,var(--green))}
+
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th{font-size:10.5px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);text-align:left;padding:7px 10px;border-bottom:1px solid var(--line)}
+  td{padding:8px 10px;border-bottom:1px solid #1A2733}
+  tr:last-child td{border-bottom:none}
+
+  .lane{display:grid;grid-template-columns:1fr 52px 1fr;gap:0;align-items:stretch}
+  .lane .arrow{display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:22px}
+  .slot{border:1.5px dashed #2A3D4E;border-radius:12px;padding:16px;background:var(--bg2)}
+  .slot.filled{border-style:solid;border-color:var(--line);background:var(--panel)}
+  .slot .name{font-weight:800;font-size:14px}
+  .seg{display:inline-flex;border:1px solid var(--line);border-radius:9px;overflow:hidden}
+  .seg button{background:transparent;border:none;color:var(--muted);padding:8px 16px;font-weight:700;font-size:12.5px;cursor:pointer}
+  .seg button.on{background:#173041;color:var(--accent)}
+  .destcard{border:1px solid var(--line);border-radius:10px;padding:12px 14px;background:var(--bg2);margin-bottom:10px}
+  .feed{font-family:var(--mono);font-size:11.5px;line-height:1.7;color:#9FB3C2;max-height:220px;overflow:auto;white-space:pre-wrap}
+  .feed .g{color:var(--green)} .feed .a{color:var(--accent)} .feed .o{color:var(--orange)}
+  input[type=text]{background:#0A141D;border:1px solid #233646;border-radius:8px;color:var(--text);padding:9px 12px;font-size:13px;width:100%}
+  .note{font-size:12px;color:var(--muted);margin-top:8px}
+  .legendbox{border-left:3px solid var(--accent);background:#0E1B24;padding:10px 14px;border-radius:0 8px 8px 0;font-size:12.5px;color:#A8BCCB;margin-bottom:16px}
+  .toolrow td{vertical-align:middle}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ════ SIDEBAR ════ -->
+  <aside class="side">
+    <div class="brand">
+      <div class="mark">MR</div>
+      <div><b>MediaRunner</b><span>v0.3.1-beta concept</span></div>
+    </div>
+    <nav id="nav">
+      <a data-p="dash" class="on">Dashboard</a>
+      <a data-p="offload">Offload</a>
+      <a data-p="ftp">FTP</a>
+      <a data-p="meta">Metadata</a>
+      <a data-p="reports">Reports</a>
+      <a data-p="network">Networking</a>
+      <a data-p="settings">Settings</a>
+    </nav>
+    <div class="runningpill" id="runpill"><span class="dot"></span><span>Offload running</span></div>
+    <div class="foot">Same logo &amp; wordmark across app, HTML reports, FTP reports and all artifacts.</div>
+  </aside>
+
+  <!-- ════ MAIN ════ -->
+  <div class="main">
+    <div class="top">
+      <h1 id="pagetitle">Dashboard</h1>
+      <span class="clock mono" id="clock"></span>
+    </div>
+    <div class="pages">
+
+      <!-- ── DASHBOARD ── -->
+      <section class="page on" id="p-dash">
+        <div class="legendbox">Clickable concept — press <b>Start Demo Offload</b> to watch the live-job treatment: byte-accurate progress, per-destination verification states, MB/s + ETA.</div>
+        <div class="grid" style="grid-template-columns:2fr 1fr">
+          <div class="panel">
+            <h3>Active Job</h3>
+            <div id="herojob">
+              <div class="row" style="margin-bottom:8px">
+                <b id="hj-name" style="font-size:16px">No active job</b>
+                <span class="chip ok" id="hj-chip" style="visibility:hidden">Idle</span>
+                <span class="sp"></span>
+                <button class="btn danger" id="hj-stop" style="visibility:hidden">Stop</button>
+              </div>
+              <div class="muted mono" id="hj-route" style="font-size:12px;margin-bottom:12px">Start an offload to see it here.</div>
+              <div class="bar"><i id="hj-bar"></i></div>
+              <div class="row" style="margin-top:10px;font-size:12.5px">
+                <span class="mono" id="hj-pct">0%</span><span class="sp"></span>
+                <span class="muted">Rate</span> <b class="mono" id="hj-rate">—</b>
+                <span class="muted" style="margin-left:14px">ETA</span> <b class="mono" id="hj-eta">—</b>
+                <span class="muted" style="margin-left:14px">Payload</span> <b class="mono" id="hj-bytes">—</b>
+              </div>
+              <div id="hj-dests" style="margin-top:14px"></div>
+            </div>
+            <div class="row" style="margin-top:14px">
+              <button class="btn primary" onclick="startDemo()">Start Demo Offload</button>
+              <span class="note">Primary First · xxh128 deferred · 412 files · 318.4 GB</span>
+            </div>
+          </div>
+          <div class="grid" style="grid-template-rows:auto auto 1fr">
+            <div class="panel"><div class="kpi" id="k-today">0 B<small>verified today</small></div></div>
+            <div class="panel"><div class="kpi"><span id="k-jobs">0</span><small>jobs in queue</small></div></div>
+            <div class="panel">
+              <h3>Activity</h3>
+              <div class="feed" id="feed">Ready.</div>
+            </div>
+          </div>
+        </div>
+        <div class="panel" style="margin-top:14px">
+          <h3>Recent Sessions</h3>
+          <table>
+            <tr><th>Status</th><th>Job</th><th>Method</th><th>Files</th><th>Data</th><th>Verified</th><th>Report</th></tr>
+            <tr><td><span class="chip ok">Verified</span></td><td>LON_Test_Clip → TESTTRANSFER</td><td>Primary First</td><td class="mono">1</td><td class="mono">5.77 GB</td><td class="mono">1 / 1</td><td><a style="color:var(--accent)" href="#">open</a></td></tr>
+            <tr><td><span class="chip fail">Cancelled</span></td><td>LON_Test_Clip → TESTTRANSFER</td><td>Primary First</td><td class="mono">1</td><td class="mono">—</td><td class="mono">0 / 1</td><td><a style="color:var(--accent)" href="#">open</a></td></tr>
+            <tr><td><span class="chip ok">Verified</span></td><td>Reel 007 — FTP array pull</td><td>FTP · ASC MHL</td><td class="mono">96</td><td class="mono">412.6 GB</td><td class="mono">96 / 96</td><td><a style="color:var(--accent)" href="#">open</a></td></tr>
+          </table>
+        </div>
+      </section>
+
+      <!-- ── OFFLOAD ── -->
+      <section class="page" id="p-offload">
+        <div class="lane" style="margin-bottom:14px">
+          <div class="slot filled">
+            <h3>Source</h3>
+            <div class="name mono">/Volumes/CARD_A001</div>
+            <div class="note">Payload: <b style="color:var(--text)">412 files · 318.4 GB</b> <span class="muted">· scanned in 0.8 s</span></div>
+            <div class="note">388 × R3D · 22 × MOV · 2 × WAV</div>
+          </div>
+          <div class="arrow">→</div>
+          <div class="slot filled">
+            <h3>Destinations <span style="float:right;font-weight:600;color:var(--accent);cursor:pointer" onclick="alert('Concept: add up to 3 destinations')">+ add</span></h3>
+            <div class="destcard">
+              <div class="row"><b>Primary</b> <span class="mono muted" style="font-size:11.5px">/Volumes/RAID_A</span><span class="sp"></span><span class="chip ok">Ready</span></div>
+              <div class="note">11.2 TB free · needs 318.4 GB + 2% headroom</div>
+            </div>
+            <div class="destcard">
+              <div class="row"><b>Secondary</b> <span class="mono muted" style="font-size:11.5px">/Volumes/SHUTTLE_2</span><span class="sp"></span><span class="chip ok">Ready</span></div>
+              <div class="note">2.4 TB free · same-volume aggregation checked</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="grid" style="grid-template-columns:1fr 1fr 1fr">
+          <div class="panel">
+            <h3>Strategy</h3>
+            <div class="seg" id="strategy">
+              <button class="on">Primary First</button><button>Simultaneous</button><button>Cascading</button>
+            </div>
+            <div class="note" id="stratnote">Primary verifies first; remaining destinations copy after.</div>
+          </div>
+          <div class="panel">
+            <h3>Verification</h3>
+            <div class="seg">
+              <button>Inline</button><button class="on">Deferred pass</button><button>Off</button>
+            </div>
+            <div class="note">xxh128 + sha256 · hash computed during the copy read</div>
+          </div>
+          <div class="panel">
+            <h3>Run</h3>
+            <div class="row">
+              <button class="btn primary big" id="startbtn" onclick="startDemo()">Start Offload</button>
+              <button class="btn danger" id="stopbtn" disabled onclick="stopDemo()">Stop</button>
+            </div>
+            <div class="note">Retries ×3 · resume on reconnect · job log on</div>
+          </div>
+        </div>
+
+        <div class="panel" style="margin-top:14px">
+          <h3>Live Transfer</h3>
+          <div id="livefiles">
+            <div class="muted" style="font-size:13px">Idle — start an offload to see per-file progress.</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── FTP (unified: array + wireless + any FTP source) ── -->
+      <section class="page" id="p-ftp">
+        <div class="legendbox">One FTP engine, any endpoint. The <b>target selector</b> decides what you're pulling from — the mapped camera array, a single camera over Wi-Fi/Ethernet, or any FTP host. Same reel/clip language, same ASC MHL verification, same reports.</div>
+        <div class="grid" style="grid-template-columns:1fr 2fr">
+          <div class="panel">
+            <h3>Pull From</h3>
+            <div class="seg" id="ftptarget" style="margin-bottom:12px">
+              <button class="on">Camera Array</button><button>Single Camera</button><button>Custom Host</button>
+            </div>
+            <div id="ftp-array-form">
+              <div class="note" style="margin:0 0 6px">Reel</div>
+              <input type="text" value="007">
+              <div class="note" style="margin:10px 0 6px">Clips</div>
+              <input type="text" value="60-64, 83" id="cliprange" oninput="validateClips(this)">
+              <div class="note" id="clipsmsg">5 clips selected · validated</div>
+            </div>
+            <div id="ftp-single-form" style="display:none">
+              <div class="note" style="margin:0 0 6px">Camera</div>
+              <div class="row">
+                <input type="text" placeholder="IP — or leave blank to scan" id="wifi-ip">
+                <button class="btn" onclick="demoScan()">Scan</button>
+              </div>
+              <div class="note" id="scanresult">Wireless &amp; wired cameras answer the same RCP2/FTPS scan.</div>
+              <div class="note" style="margin:10px 0 6px">Reel / Clips</div>
+              <input type="text" value="007 · ALL">
+            </div>
+            <div id="ftp-custom-form" style="display:none">
+              <div class="note" style="margin:0 0 6px">Host</div>
+              <input type="text" placeholder="ftps://host:21/path">
+              <div class="note">Credentials from Networking page, or per-host override.</div>
+            </div>
+            <div class="row" style="margin-top:14px">
+              <button class="btn primary" id="ftp-pull-btn">Pull from 42 cameras</button>
+            </div>
+            <div class="row" style="margin-top:12px">
+              <span class="note" style="margin:0">ASC MHL verification</span>
+              <span class="seg" id="mhlseg" style="margin-left:6px">
+                <button class="on">On</button><button>Strict</button><button>Off</button>
+              </span>
+            </div>
+            <div class="note" id="mhlnote">On: verify against camera MHL when present, local checksums otherwise.</div>
+            <div class="note">Resume + 3 retries per clip</div>
+          </div>
+          <div class="panel">
+            <h3 id="ftp-status-title">Array Status</h3>
+            <table>
+              <tr><th>Cam</th><th>Endpoint</th><th>Link</th><th>State</th><th>Last Pull</th><th>MHL</th></tr>
+              <tr><td class="mono">GA</td><td class="mono">172.20.114.165</td><td class="mono">Eth</td><td><span class="chip ok">Online</span></td><td class="mono">007 / A083</td><td><span class="chip ok">Verified</span></td></tr>
+              <tr><td class="mono">GB</td><td class="mono">172.20.114.166</td><td class="mono">Eth</td><td><span class="chip ok">Online</span></td><td class="mono">007 / A083</td><td><span class="chip ok">Verified</span></td></tr>
+              <tr><td class="mono">HC</td><td class="mono">172.20.114.171</td><td class="mono">Eth</td><td><span class="chip run">Reconnecting · retry 2/3</span></td><td class="mono">007 / A081 — resuming at 86%</td><td><span class="chip warn">Pending</span></td></tr>
+              <tr><td class="mono">KOMODO_7A2</td><td class="mono">169.254.18.40</td><td class="mono">Wi-Fi</td><td><span class="chip ok">Online</span></td><td class="mono">007 / A012</td><td><span class="chip ok">Verified</span></td></tr>
+              <tr><td class="mono">JD</td><td class="mono">172.20.114.180</td><td class="mono">Eth</td><td><span class="chip fail">Offline</span></td><td class="mono">&mdash;</td><td class="mono">&mdash;</td></tr>
+            </table>
+            <div class="note">Wired and wireless cameras share one status table — the transport is just a column. Drops resume from the last byte (REST) instead of restarting the clip.</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── METADATA ── -->
+      <section class="page" id="p-meta">
+        <div class="grid" style="grid-template-columns:1fr 2fr">
+          <div class="panel">
+            <h3>Scrape</h3>
+            <div class="note" style="margin:0 0 6px">Media folder</div>
+            <div class="row"><input type="text" value="/Volumes/RAID_A/DAY_017"><button class="btn">Browse…</button></div>
+            <div class="note" style="margin:10px 0 6px">Output</div>
+            <div class="row"><input type="text" value="/Volumes/RAID_A/DAY_017/_metadata"><button class="btn">Browse…</button></div>
+            <div class="row" style="margin-top:14px">
+              <button class="btn primary">Scrape LTC + Metadata</button>
+            </div>
+            <div class="note">R3D via REDline · MOV/MXF via FFprobe · stills/audio via ExifTool. Per-frame CSVs + master CSV. 300 s tool timeout.</div>
+          </div>
+          <div class="panel">
+            <h3>Tool Status <span style="float:right;font-weight:600;color:var(--accent);cursor:pointer" onclick="goPage('settings')">configure →</span></h3>
+            <table class="toolrow">
+              <tr><th>Tool</th><th>Path</th><th>Status</th><th>Used For</th></tr>
+              <tr><td><b>REDline</b></td><td class="mono" style="font-size:11px">/Applications/REDCINE-X…/REDline</td><td><span class="chip ok">Detected</span></td><td>R3D LTC / frame metadata</td></tr>
+              <tr><td><b>FFprobe</b></td><td class="mono" style="font-size:11px">/opt/homebrew/…/ffprobe</td><td><span class="chip ok">Detected</span></td><td>MOV / MXF / generic video</td></tr>
+              <tr><td><b>FFmpeg</b></td><td class="mono" style="font-size:11px">/opt/homebrew/…/ffmpeg</td><td><span class="chip ok">Detected</span></td><td>Optional transcodes</td></tr>
+              <tr><td><b>ExifTool</b></td><td class="mono" style="font-size:11px">/opt/homebrew/…/exiftool</td><td><span class="chip ok">Detected</span></td><td>Stills / audio sidecars</td></tr>
+            </table>
+            <div class="note">Tool paths auto-detect from PATH, /opt/homebrew/bin and /usr/local/bin — override in Settings.</div>
+          </div>
+        </div>
+        <div class="panel" style="margin-top:14px">
+          <h3>Last Scrape</h3>
+          <table>
+            <tr><th>Clip</th><th>Start TC</th><th>End TC</th><th>FPS</th><th>Lens</th><th>ISO</th><th>Per-frame CSV</th></tr>
+            <tr><td class="mono">G007_A083_0301AB.R3D</td><td class="mono">17:42:10:03</td><td class="mono">17:44:51:22</td><td class="mono">23.976</td><td>50mm Signature</td><td class="mono">800</td><td><a style="color:var(--accent)" href="#">open</a></td></tr>
+            <tr><td class="mono">J002_D017_0604TO_001.mov</td><td class="mono">09:15:00:00</td><td class="mono">09:21:12:08</td><td class="mono">23.976</td><td>&mdash;</td><td class="mono">&mdash;</td><td><a style="color:var(--accent)" href="#">open</a></td></tr>
+          </table>
+        </div>
+      </section>
+
+      <!-- ── REPORTS ── -->
+      <section class="page" id="p-reports">
+        <div class="grid" style="grid-template-columns:1fr 2fr">
+          <div class="panel">
+            <h3>Sessions</h3>
+            <table>
+              <tr><th>Session</th><th>Status</th></tr>
+              <tr><td class="mono" style="font-size:11.5px">CARD_A001 → RAID_A</td><td><span class="chip ok">1/1</span></td></tr>
+              <tr><td class="mono" style="font-size:11.5px">Reel 007 array pull</td><td><span class="chip ok">96/96</span></td></tr>
+              <tr><td class="mono" style="font-size:11.5px">LON_Test cancel test</td><td><span class="chip fail">0/1</span></td></tr>
+            </table>
+            <div class="row" style="margin-top:12px">
+              <button class="btn">Custom Report Designer…</button>
+            </div>
+            <div class="note">Templates, media-only filtering, and metadata enrichment carry over from the current Reports tab unchanged.</div>
+          </div>
+          <div class="panel">
+            <h3>Report Preview — consistent branding, no empty cells</h3>
+            <div style="background:#fff;color:#222;border-radius:8px;padding:18px;font-family:Helvetica,sans-serif">
+              <div style="display:flex;align-items:center;gap:14px;border-bottom:4px solid #000;padding-bottom:12px;margin-bottom:12px">
+                <div style="width:42px;height:42px;border-radius:8px;background:linear-gradient(135deg,#5AC8E6,#2D7FA0);display:flex;align-items:center;justify-content:center;font-weight:900;color:#06121A">MR</div>
+                <div><div style="font-size:20px;font-weight:900">MediaRunner Transfer Report</div>
+                <div style="color:#666;font-size:12px">Project: LON_TEST · Primary First Copy · 2026-06-10</div></div>
+              </div>
+              <table style="width:100%;border-collapse:collapse;font-size:11px;color:#222">
+                <tr style="background:#222;color:#fff"><th style="padding:6px;text-align:left">Status</th><th style="text-align:left">Cam</th><th style="text-align:left">Reel</th><th style="text-align:left">Clip</th><th style="text-align:left">File</th><th style="text-align:left">Size</th><th style="text-align:left">xxh128</th></tr>
+                <tr><td style="padding:6px;color:#28a745;font-weight:700">Verified</td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>J002_D017_0604TO_001.mov</td><td>5.77 GB</td><td style="font-family:monospace;font-size:10px">b28a4265005fe163…</td></tr>
+                <tr><td style="padding:6px;color:#28a745;font-weight:700">Verified</td><td>GA</td><td>G007</td><td>A083</td><td>G007_A083_0301AB.R3D</td><td>8.94 GB</td><td style="font-family:monospace;font-size:10px">77c1b04265005fe1…</td></tr>
+              </table>
+              <div style="font-size:10.5px;color:#666;margin-top:8px">Non-hierarchical sources (e.g. ProRes at card root) render &mdash; instead of blanks.</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── NETWORKING ── -->
+      <section class="page" id="p-network">
+        <div class="grid" style="grid-template-columns:2fr 1fr">
+          <div class="panel">
+            <h3>Camera Map <span style="float:right;font-weight:600;color:var(--accent);cursor:pointer" onclick="alert('Concept: restore factory camera map')">restore defaults</span></h3>
+            <table>
+              <tr><th>Label</th><th>IP</th><th>Probe</th></tr>
+              <tr><td class="mono">AA</td><td class="mono">172.20.114.141</td><td><span class="chip ok">Online</span></td></tr>
+              <tr><td class="mono">AB</td><td class="mono">172.20.114.142</td><td><span class="chip ok">Online</span></td></tr>
+              <tr><td class="mono">AC</td><td class="mono">172.20.114.143</td><td><span class="chip fail">Offline</span></td></tr>
+              <tr><td class="mono muted" colspan="3">… 39 more · editable inline, scanned with 24 threads</td></tr>
+            </table>
+            <div class="row" style="margin-top:12px"><button class="btn">Scan All</button><button class="btn">Add Camera</button></div>
+          </div>
+          <div class="panel">
+            <h3>FTP Credentials</h3>
+            <div class="note" style="margin:0 0 6px">Username</div>
+            <input type="text" value="ftp1">
+            <div class="note" style="margin:10px 0 6px">Password</div>
+            <input type="text" value="••••••••">
+            <div class="note" style="margin:10px 0 6px">Port / Timeout</div>
+            <div class="row"><input type="text" value="21" style="width:70px"><input type="text" value="2.0 s" style="width:90px"><span class="sp"></span></div>
+            <div class="row" style="margin-top:14px"><button class="btn primary">Save</button><button class="btn">Test</button></div>
+            <div class="note">Snapshotted per job — edits here never change a running transfer. Stored 0600, plain text on a closed camera network.</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── SETTINGS ── -->
+      <section class="page" id="p-settings">
+        <div class="grid" style="grid-template-columns:1fr 1fr">
+          <div class="panel">
+            <h3>Application Log</h3>
+            <div class="note" style="margin-bottom:6px">Log folder</div>
+            <div class="row">
+              <input type="text" placeholder="~/.mediarunner/logs">
+              <button class="btn">Browse…</button>
+              <button class="btn" onclick="alert('Opens the log folder in Finder.\n\nmediarunner.log — rotating app log\ncrash.log — native crash tracebacks')">Open Logs</button>
+            </div>
+            <div class="note">Blank = default. Rotating 5×5 MB + crash.log. Custom folder takes effect on next launch.</div>
+          </div>
+          <div class="panel">
+            <h3>Resilience</h3>
+            <table>
+              <tr><td>Retry attempts</td><td class="mono">3</td></tr>
+              <tr><td>Backoff base</td><td class="mono">1.5 s · exponential</td></tr>
+              <tr><td>FTP resume (REST)</td><td><span class="chip ok">On</span></td></tr>
+              <tr><td>Disk-full behavior</td><td>Abort job</td></tr>
+              <tr><td>Capacity headroom</td><td class="mono">2%</td></tr>
+            </table>
+          </div>
+        </div>
+        <div class="panel" style="margin-top:14px">
+          <h3>Metadata Tools</h3>
+          <table class="toolrow">
+            <tr><th>Tool</th><th>Path (blank = auto-detect)</th><th></th><th>Status</th></tr>
+            <tr><td style="width:90px"><b>REDline</b></td><td><input type="text" placeholder="Auto-detect"></td><td style="width:90px"><button class="btn">Browse…</button></td><td style="width:110px"><span class="chip ok">Detected</span></td></tr>
+            <tr><td><b>FFmpeg</b></td><td><input type="text" placeholder="Auto-detect"></td><td><button class="btn">Browse…</button></td><td><span class="chip ok">Detected</span></td></tr>
+            <tr><td><b>FFprobe</b></td><td><input type="text" placeholder="Auto-detect"></td><td><button class="btn">Browse…</button></td><td><span class="chip ok">Detected</span></td></tr>
+            <tr><td><b>ExifTool</b></td><td><input type="text" placeholder="Auto-detect"></td><td><button class="btn">Browse…</button></td><td><span class="chip ok">Detected</span></td></tr>
+          </table>
+          <div class="note">These drive the Metadata tab — REDline for R3D, FFprobe for generic video, ExifTool for stills/audio.</div>
+        </div>
+        <div class="panel" style="margin-top:14px">
+          <h3>Diagnostics <span class="chip warn" id="engchip" style="float:right">🔒 Engineering — locked</span></h3>
+          <div id="englocked">
+            <div class="row">
+              <input type="text" placeholder="Engineering password" style="max-width:240px" id="engpw">
+              <button class="btn" onclick="unlockEng()">Unlock</button>
+            </div>
+            <div class="note">Validation and field-stress tooling are engineer-only. Password set on first unlock; locks again on relaunch. (Demo: any password works.)</div>
+          </div>
+          <div id="engtools" style="display:none">
+            <div class="row" style="flex-wrap:wrap;gap:8px">
+              <button class="btn" onclick="alert('run_validation_suite.py --profile quick')">Validation (Quick)</button>
+              <button class="btn" onclick="alert('run_validation_suite.py --profile extended')">Validation (Extended)</button>
+              <button class="btn primary" onclick="alert('run_validation_suite.py --profile stress-field\n\nftp_drop_resume · ftp_reject_rest · ftp_stall_timeout\nkill_mid_transfer · enospc_abort · cancel_fuzzer')">Field Stress</button>
+              <button class="btn">Export Support Bundle</button>
+            </div>
+            <table style="margin-top:12px">
+              <tr><th>Field-stress scenario</th><th>Proves</th><th>Last</th></tr>
+              <tr><td class="mono">ftp_drop_resume</td><td>Connection death mid-file → retry, reconnect, REST resume</td><td><span class="chip ok">PASS</span></td></tr>
+              <tr><td class="mono">ftp_reject_rest</td><td>Server refuses resume → clean restart still verifies</td><td><span class="chip ok">PASS</span></td></tr>
+              <tr><td class="mono">ftp_stall_timeout</td><td>Stalled transfer → timeout, reconnect, recover</td><td><span class="chip ok">PASS</span></td></tr>
+              <tr><td class="mono">kill_mid_transfer</td><td>SIGKILL mid-copy ×N → zero corrupt committed files, rerun converges</td><td><span class="chip ok">PASS</span></td></tr>
+              <tr><td class="mono">enospc_abort</td><td>Disk full mid-write → job aborts, nothing committed</td><td><span class="chip ok">PASS</span></td></tr>
+              <tr><td class="mono">cancel_fuzzer</td><td>Random cancels ×N → only Verified/Cancelled outcomes</td><td><span class="chip ok">PASS</span></td></tr>
+            </table>
+            <div class="note">Remaining on the manual matrix: real cameras, physical drive unplug, multi-TB soak.</div>
+          </div>
+        </div>
+      </section>
+
+    </div>
+  </div>
+</div>
+
+<script>
+/* nav */
+const titles={dash:"Dashboard",offload:"Offload",ftp:"FTP",meta:"Metadata",reports:"Reports",network:"Networking",settings:"Settings"};
+function goPage(p){
+  document.querySelectorAll("#nav a").forEach(x=>x.classList.toggle("on",x.dataset.p===p));
+  document.querySelectorAll(".page").forEach(x=>x.classList.remove("on"));
+  document.getElementById("p-"+p).classList.add("on");
+  document.getElementById("pagetitle").textContent=titles[p];
+}
+document.querySelectorAll("#nav a").forEach(a=>a.onclick=()=>goPage(a.dataset.p));
+/* clock */
+setInterval(()=>{document.getElementById("clock").textContent=new Date().toLocaleTimeString()},1000);
+/* segmented controls */
+document.querySelectorAll(".seg").forEach(seg=>seg.querySelectorAll("button").forEach(b=>b.onclick=()=>{
+  seg.querySelectorAll("button").forEach(x=>x.classList.remove("on"));b.classList.add("on");
+  if(seg.id==="strategy"){document.getElementById("stratnote").textContent={
+    "Primary First":"Primary verifies first; remaining destinations copy after.",
+    "Simultaneous":"All destinations copy in parallel from the source.",
+    "Cascading":"Source → Primary → Secondary; each leg verifies before the next."}[b.textContent];}
+  if(seg.id==="mhlseg"){document.getElementById("mhlnote").textContent={
+    "On":"On: verify against camera MHL when present, local checksums otherwise.",
+    "Strict":"Strict: missing or unparseable camera MHL fails the clip.",
+    "Off":"Off: local audit checksums only — recorded honestly in the report."}[b.textContent];}
+  if(seg.id==="ftptarget"){
+    const mode=b.textContent;
+    document.getElementById("ftp-array-form").style.display=mode==="Camera Array"?"":"none";
+    document.getElementById("ftp-single-form").style.display=mode==="Single Camera"?"":"none";
+    document.getElementById("ftp-custom-form").style.display=mode==="Custom Host"?"":"none";
+    document.getElementById("ftp-pull-btn").textContent={"Camera Array":"Pull from 42 cameras","Single Camera":"Pull from camera","Custom Host":"Pull from host"}[mode];
+    document.getElementById("ftp-status-title").textContent={"Camera Array":"Array Status","Single Camera":"Discovered Cameras","Custom Host":"Host Status"}[mode];
+  }
+}));
+/* engineering unlock demo */
+function unlockEng(){
+  if(!document.getElementById("engpw").value)return;
+  document.getElementById("englocked").style.display="none";
+  document.getElementById("engtools").style.display="";
+  const c=document.getElementById("engchip");c.className="chip ok";c.textContent="Engineering — unlocked";
+}
+/* wireless scan demo */
+function demoScan(){
+  const r=document.getElementById("scanresult");
+  r.textContent="Scanning local subnets for RCP2…";
+  setTimeout(()=>{r.innerHTML='Found <b style="color:var(--text)">KOMODO_7A2</b> at 169.254.18.40 (Wi-Fi)';document.getElementById("wifi-ip").value="169.254.18.40";},900);
+}
+/* clip validation demo */
+function validateClips(el){
+  const ok=/^\s*\d+(\s*-\s*\d+)?(\s*,\s*\d+(\s*-\s*\d+)?)*\s*$/.test(el.value);
+  const msg=document.getElementById("clipsmsg");
+  msg.textContent= ok ? "Validated before the worker starts" : "Invalid — use numbers, commas, ranges like 60-64";
+  msg.style.color= ok ? "" : "var(--red)";
+}
+/* demo offload */
+let demo=null;
+const feed=document.getElementById("feed");
+function logf(t,c){feed.innerHTML+=`\n<span class="${c||''}">[${new Date().toLocaleTimeString()}] ${t}</span>`;feed.scrollTop=feed.scrollHeight;}
+function startDemo(){
+  if(demo)return;
+  const dests=[{n:"Primary"},{n:"Secondary"}];
+  const hj=document.getElementById("hj-dests");hj.innerHTML="";
+  dests.forEach((d,i)=>{hj.innerHTML+=`<div class="row" style="margin-top:8px;font-size:12.5px"><span style="width:90px;font-weight:700">${d.n}</span><div class="bar sp" style="height:7px"><i id="db${i}"></i></div><span class="chip run" id="dc${i}" style="margin-left:10px">Copying</span></div>`});
+  document.getElementById("hj-name").textContent="CARD_A001 Offload";
+  document.getElementById("hj-route").textContent="/Volumes/CARD_A001 → RAID_A, SHUTTLE_2 · Primary First · xxh128 deferred";
+  const chip=document.getElementById("hj-chip");chip.style.visibility="visible";chip.className="chip run";chip.textContent="Running";
+  document.getElementById("hj-stop").style.visibility="visible";
+  document.getElementById("hj-stop").onclick=stopDemo;
+  document.getElementById("runpill").style.visibility="visible";
+  document.getElementById("k-jobs").textContent="1";
+  document.getElementById("stopbtn").disabled=false;document.getElementById("startbtn").disabled=true;
+  const lf=document.getElementById("livefiles");
+  lf.innerHTML=`<div class="row" style="font-size:12.5px"><span class="mono sp">G007_A083_0301AB.R3D</span><span class="mono muted" id="lf-pct">0%</span></div><div class="bar" style="margin-top:6px"><i id="lf-bar"></i></div>`;
+  logf("Preflight payload: 412 files · 318.4 GB","a");
+  logf("Capacity: per-volume aggregate + 2% headroom — OK","a");
+  let p=0,total=318.4;
+  demo=setInterval(()=>{
+    p=Math.min(100,p+0.7+Math.random()*0.6);
+    const rate=(380+Math.random()*120);
+    const done=total*p/100;
+    const eta=Math.max(0,(total-done)/(rate/1024));
+    document.getElementById("hj-bar").style.width=p+"%";
+    document.getElementById("hj-pct").textContent=p.toFixed(1)+"%";
+    document.getElementById("hj-rate").textContent=rate.toFixed(0)+" MB/s";
+    document.getElementById("hj-eta").textContent=eta>60?(eta/60).toFixed(0)+"m "+(eta%60).toFixed(0)+"s":eta.toFixed(0)+"s";
+    document.getElementById("hj-bytes").textContent=done.toFixed(1)+" / 318.4 GB";
+    document.getElementById("db0").style.width=Math.min(100,p*1.35)+"%";
+    document.getElementById("db1").style.width=Math.max(0,p*1.35-35)+"%";
+    const fp=(p*4)%100;
+    document.getElementById("lf-bar").style.width=fp+"%";
+    document.getElementById("lf-pct").textContent=fp.toFixed(0)+"%";
+    if(p*1.35>=100){const c=document.getElementById("dc0");c.className="chip ok";c.textContent="Verifying";document.querySelector("#db0").parentElement.classList.add("green");}
+    if(p>=100)finishDemo();
+  },120);
+}
+function finishDemo(){
+  clearInterval(demo);demo=null;
+  ["dc0","dc1"].forEach(id=>{const c=document.getElementById(id);c.className="chip ok";c.textContent="Verified";});
+  ["db0","db1"].forEach(id=>{const b=document.getElementById(id);b.style.width="100%";b.parentElement.classList.add("green");});
+  const chip=document.getElementById("hj-chip");chip.className="chip ok";chip.textContent="Complete";
+  document.getElementById("hj-stop").style.visibility="hidden";
+  document.getElementById("runpill").style.visibility="hidden";
+  document.getElementById("k-jobs").textContent="0";
+  document.getElementById("k-today").innerHTML="318.4 GB<small>verified today</small>";
+  document.getElementById("stopbtn").disabled=true;document.getElementById("startbtn").disabled=false;
+  logf("412 / 412 verified · xxh128 + sha256","g");
+  logf("Report: MediaRunner_Report_CARD_A001.html","g");
+}
+function stopDemo(){
+  if(!demo)return;clearInterval(demo);demo=null;
+  const chip=document.getElementById("hj-chip");chip.className="chip warn";chip.textContent="Cancelled";
+  document.getElementById("hj-stop").style.visibility="hidden";
+  document.getElementById("runpill").style.visibility="hidden";
+  document.getElementById("stopbtn").disabled=true;document.getElementById("startbtn").disabled=false;
+  ["dc0","dc1"].forEach(id=>{const c=document.getElementById(id);if(c.textContent!=="Verified"){c.className="chip warn";c.textContent="Cancelled";}});
+  logf("Stop requested — workers exit at next chunk; .part files kept for resume","o");
+}
+</script>
+</body>
+</html>

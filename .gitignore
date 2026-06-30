@@ -1,0 +1,13 @@
+.venv/
+build/
+dist/
+__pycache__/
+*.pyc
+.pyinstaller-cache/
+validation_runs/
+.DS_Store
+MediaRunner-beta.zip
+_cleanup_delete_*/
+*.bak_*
+*.before_request_stop_patch
+PATCH_*.py

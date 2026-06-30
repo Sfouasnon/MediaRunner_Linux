@@ -1,0 +1,58 @@
+# MediaRunner Linux Build
+
+This folder is a Linux build workspace copied from the current MediaRunner V2 source. The original macOS source tree is unchanged.
+
+## Current status
+
+- Build scripts are ready for a Linux host or Docker-capable build machine.
+- PyInstaller must run on Linux to produce a Linux executable.
+
+## Native Linux build
+
+Run on a Linux desktop or build VM:
+
+```bash
+cd /path/to/MediaRunner_Linux
+chmod +x build_linux.sh
+./build_linux.sh
+```
+
+Output:
+
+```text
+dist/MediaRunner/MediaRunner
+```
+
+## Docker build
+
+Run on a Docker-capable host:
+
+```bash
+cd /path/to/MediaRunner_Linux
+chmod +x build_linux_container.sh
+./build_linux_container.sh
+```
+
+By default the Docker script builds `linux/amd64`. Override with:
+
+```bash
+PLATFORM=linux/arm64 ./build_linux_container.sh
+```
+
+Output:
+
+```text
+dist-linux/MediaRunner/MediaRunner
+dist/MediaRunner-linux-amd64.tar.gz
+```
+
+## Linux runtime notes
+
+The first Linux build should be validated on the target distro with:
+
+```bash
+python verify_install.py
+python validation/run_validation_suite.py --profile extended --work-dir ./validation_runs/linux_extended_001
+```
+
+Real release signoff still needs a GUI smoke test, a local offload test, metadata tool detection with Linux `ffmpeg`/`ffprobe`/`exiftool`, and real RED camera FTP/RCP2 testing.

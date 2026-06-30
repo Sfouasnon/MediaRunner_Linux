@@ -1,0 +1,4 @@
+PySide6
+pyinstaller
+xxhash
+pyftpdlib  # dev-only: required for validation --profile stress-field
