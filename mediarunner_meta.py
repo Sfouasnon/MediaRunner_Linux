@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -43,6 +44,16 @@ CSV_FIELDS = [
 
 ProgressCallback = Callable[[int, int, Path, dict], None]
 LogCallback = Callable[[str], None]
+
+
+def metadata_worker_count(total_files: int, configured_workers: int | None = None) -> int:
+    """Return the bounded per-file metadata worker count for a run."""
+    try:
+        requested = int(configured_workers if configured_workers is not None else 4)
+    except (TypeError, ValueError):
+        requested = 4
+    total = max(1, int(total_files or 1))
+    return max(1, min(24, requested, total))
 
 
 @dataclass(frozen=True)
@@ -731,6 +742,37 @@ def _generic_row(path: Path, tools: dict[str, Optional[str]], metadata_type: str
     return row
 
 
+def _metadata_row_for_path(
+    path: Path,
+    tools: dict[str, Optional[str]],
+    metadata_type: str,
+    raw_dir: Optional[Path],
+    *,
+    keep_sidecars: bool,
+    save_raw: bool,
+) -> dict:
+    suffix = path.suffix.lower()
+    if suffix in RED_EXTENSIONS:
+        redline = tools.get("redline")
+        if not redline:
+            raise RuntimeError("REDline not configured or not found")
+        return _red_row(path, redline, metadata_type, raw_dir, keep_sidecars or save_raw)
+    if metadata_type in {"RED Per-Frame / Lens Metadata", "RED Gyro / IMU Metadata"}:
+        row = _blank_row(path, "Generic Video", metadata_type, "")
+        row["status"] = "FAIL"
+        row["warnings"] = "RED per-frame / gyro metadata only applies to R3D clips"
+        return row
+    return _generic_row(path, tools, metadata_type, raw_dir if save_raw else None)
+
+
+def _metadata_failure_row(path: Path, metadata_type: str, exc: Exception) -> dict:
+    family = "RED" if path.suffix.lower() in RED_EXTENSIONS else "Generic Video"
+    row = _blank_row(path, family, metadata_type, "")
+    row["status"] = "FAIL"
+    row["warnings"] = str(exc)
+    return row
+
+
 def _write_master_csv(path: Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", newline="", encoding="utf-8") as f:
@@ -814,6 +856,7 @@ def process_metadata(
     metadata_type: str = "Timecode Summary",
     keep_sidecars: bool = False,
     save_raw: bool = False,
+    metadata_workers: int | None = None,
     tool_config: Optional[dict] = None,
     progress_callback: Optional[ProgressCallback] = None,
     log_callback: Optional[LogCallback] = None,
@@ -840,35 +883,49 @@ def process_metadata(
     if raw_dir:
         raw_dir.mkdir(parents=True, exist_ok=True)
 
-    rows: list[dict] = []
     total = len(files)
-    for index, path in enumerate(files, start=1):
-        suffix = path.suffix.lower()
+    worker_count = metadata_worker_count(total, metadata_workers if metadata_workers is not None else cfg.get("metadata_workers"))
+    if log_callback:
+        log_callback(f"Metadata workers: using {worker_count} for {total} file(s)")
+
+    rows_by_index: list[Optional[dict]] = [None] * total
+    completed = 0
+
+    def process_one(index: int, path: Path) -> tuple[int, Path, dict, str]:
         try:
-            if suffix in RED_EXTENSIONS:
-                redline = tools.get("redline")
-                if not redline:
-                    raise RuntimeError("REDline not configured or not found")
-                row = _red_row(path, redline, metadata_type, raw_dir, keep_sidecars or save_raw)
-            else:
-                if metadata_type in {"RED Per-Frame / Lens Metadata", "RED Gyro / IMU Metadata"}:
-                    row = _blank_row(path, "Generic Video", metadata_type, "")
-                    row["status"] = "FAIL"
-                    row["warnings"] = "RED per-frame / gyro metadata only applies to R3D clips"
-                else:
-                    row = _generic_row(path, tools, metadata_type, raw_dir if save_raw else None)
-            rows.append(row)
-            if log_callback:
-                log_callback(f"{row.get('status','OK')}: {path.name} · {row.get('tool','')}")
+            row = _metadata_row_for_path(
+                path,
+                tools,
+                metadata_type,
+                raw_dir,
+                keep_sidecars=keep_sidecars,
+                save_raw=save_raw,
+            )
+            message = f"{row.get('status','OK')}: {path.name} · {row.get('tool','')}"
         except Exception as exc:
-            row = _blank_row(path, "RED" if suffix in RED_EXTENSIONS else "Generic Video", metadata_type, "")
-            row["status"] = "FAIL"
-            row["warnings"] = str(exc)
-            rows.append(row)
-            if log_callback:
-                log_callback(f"FAIL: {path.name} · {exc}")
+            row = _metadata_failure_row(path, metadata_type, exc)
+            message = f"FAIL: {path.name} · {exc}"
+        return index, path, row, message
+
+    def accept_result(index: int, path: Path, row: dict, message: str) -> None:
+        nonlocal completed
+        rows_by_index[index] = row
+        completed += 1
+        if log_callback:
+            log_callback(message)
         if progress_callback:
-            progress_callback(index, total, path, rows[-1])
+            progress_callback(completed, total, path, row)
+
+    if worker_count == 1:
+        for index, path in enumerate(files):
+            accept_result(*process_one(index, path))
+    else:
+        with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="mediarunner-meta") as executor:
+            futures = [executor.submit(process_one, index, path) for index, path in enumerate(files)]
+            for future in as_completed(futures):
+                accept_result(*future.result())
+
+    rows = [row for row in rows_by_index if row is not None]
 
     _write_master_csv(master_csv, rows)
     _write_html_report(report_html, rows, source_root, metadata_type, tools)

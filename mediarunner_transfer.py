@@ -376,6 +376,7 @@ if __name__ == "__main__":
 
     result = run_transfer(src_root, dst_root, project, manifest,
                           clip_filter, threads=threads, verify=verify)
+    manifest.close()
 
     if result:
         ok, fail = result

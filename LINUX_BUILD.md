@@ -61,6 +61,27 @@ It saves a destination profile in the local MediaRunner config. Multi-Mag
 Offload applies matching destination profiles automatically; with multiple
 destinations selected, the most conservative profile caps magazine concurrency.
 
+Camera-array FTP ingest workflow:
+
+```text
+Networking -> FTP Download Workers
+FTP -> Camera Array -> Start Download
+```
+
+The old large-array hard cap is removed. FTP camera pulls now use the configured
+worker count, capped by active online cameras. For 36 tethered cameras, tune this
+against the switch and target storage instead of relying on a baked-in value.
+
+Metadata extraction:
+
+```text
+Settings -> Metadata workers
+Metadata -> Extract Metadata
+```
+
+REDline, ffprobe, and ExifTool processing now runs in parallel per file, then
+writes the master CSV/report once after all rows complete.
+
 The first Linux build should be validated on the target distro with:
 
 ```bash

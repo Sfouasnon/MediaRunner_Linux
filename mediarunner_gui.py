@@ -50,7 +50,7 @@ from PySide6.QtWidgets import (
     QPushButton, QProgressBar, QTableWidget, QTableWidgetItem, QHeaderView,
     QFileDialog, QCheckBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit,
     QComboBox, QRadioButton, QButtonGroup, QSizePolicy, QDialog, QSplitter,
-    QListWidget, QListWidgetItem, QAbstractItemView, QMessageBox
+    QListWidget, QListWidgetItem, QAbstractItemView, QMessageBox, QTextBrowser
 )
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -1507,9 +1507,30 @@ class TransferPage(QWidget, ActivityLogMixin):
         ver_panel, vv = panel("Verification")
         self.verify_seg = SegmentedControl(["Inline", "Deferred pass", "Off"])
         vv.addWidget(self.verify_seg)
-        ver_note = label("xxh128 + sha256 · hash computed during the copy read", "muted")
-        ver_note.setWordWrap(True)
-        vv.addWidget(ver_note)
+        self._checksum_presets = [
+            ("xxh128 + sha256 (robust)", "xxh128,sha256"),
+            ("xxh128 (fast)", "xxh128"),
+            ("xxh3-64be (fast)", "xxh3_64be"),
+            ("sha256", "sha256"),
+            ("md5 (LTO)", "md5"),
+        ]
+        cs_row = QHBoxLayout()
+        cs_row.addWidget(label("Checksum"))
+        self.checksum_combo = QComboBox()
+        self.checksum_combo.addItems([lbl for lbl, _v in self._checksum_presets])
+        cs_row.addWidget(self.checksum_combo, 1)
+        vv.addLayout(cs_row)
+        self.ver_note = label("", "muted")
+        self.ver_note.setWordWrap(True)
+        vv.addWidget(self.ver_note)
+        try:
+            from mediarunner_core import load_network_config
+            _saved_cs = str(load_network_config().get("checksum_algorithms", "xxh128,sha256"))
+        except Exception:
+            _saved_cs = "xxh128,sha256"
+        self._set_checksum_combo_from_value(_saved_cs)
+        self.checksum_combo.currentTextChanged.connect(lambda _t: self._on_checksum_changed())
+        self._update_checksum_note()
         self.report_html = QCheckBox("HTML Report"); self.report_html.setChecked(True)
         self.report_csv = QCheckBox("CSV Manifest"); self.report_csv.setChecked(True)
         rep_row = QHBoxLayout(); rep_row.addWidget(self.report_html); rep_row.addWidget(self.report_csv); rep_row.addStretch()
@@ -1973,6 +1994,9 @@ class TransferPage(QWidget, ActivityLogMixin):
                         kwargs.setdefault("source_path", self.source)
                         kwargs.setdefault("destination_path", self.destination)
                         self.manifest.write(**kwargs)
+                    def close(self):
+                        if hasattr(self.manifest, "close"):
+                            self.manifest.close()
 
                 plans = []
                 name_counts: dict[str, int] = {}
@@ -2171,6 +2195,8 @@ class TransferPage(QWidget, ActivityLogMixin):
 
                 def write_reports(plan: dict, ctx: dict):
                     manifest_csv = ctx["manifest_csv"]
+                    if hasattr(ctx["manifest"], "close"):
+                        ctx["manifest"].close()
                     if self.report_html.isChecked():
                         report_name = f"MediaRunner_Report_{safe_project}_{plan['safe_name']}_{ctx['safe_role']}_{ts}.html"
                         report = ctx["checksums"] / report_name
@@ -2345,6 +2371,43 @@ class TransferPage(QWidget, ActivityLogMixin):
 
         self.thread = threading.Thread(target=work, daemon=True); self.thread.start()
 
+    def checksum_value(self) -> str:
+        lbl = self.checksum_combo.currentText()
+        for l, v in self._checksum_presets:
+            if l == lbl:
+                return v
+        return "xxh128,sha256"
+
+    def _set_checksum_combo_from_value(self, value: str):
+        try:
+            from mediarunner_core import parse_checksum_algorithms
+            want = ",".join(parse_checksum_algorithms(value))
+            for i, (_l, v) in enumerate(self._checksum_presets):
+                if ",".join(parse_checksum_algorithms(v)) == want:
+                    self.checksum_combo.setCurrentIndex(i); return
+        except Exception:
+            pass
+        self.checksum_combo.setCurrentIndex(0)
+
+    def _update_checksum_note(self):
+        names = self.checksum_value().replace(",", " + ")
+        self.ver_note.setText(f"{names} · hash computed during the copy read")
+
+    def _on_checksum_changed(self):
+        self._update_checksum_note()
+        try:
+            from mediarunner_core import load_network_config, save_network_config
+            cfg = load_network_config(); cfg["checksum_algorithms"] = self.checksum_value(); save_network_config(cfg)
+        except Exception:
+            pass
+
+    def _apply_active_checksums(self):
+        try:
+            from mediarunner_core import set_active_checksum_algorithms
+            set_active_checksum_algorithms(self.checksum_value())
+        except Exception:
+            pass
+
     def start_transfer(self):
         source_paths = self.sources()
         dests = self.destinations()
@@ -2352,6 +2415,7 @@ class TransferPage(QWidget, ActivityLogMixin):
             self.status_label.setText("Source and destination required")
             log_to(self.console, "Source and at least one destination are required", RED)
             return
+        self._apply_active_checksums()
         if self.source_mode.current() == "Multi-Mag":
             self.start_multi_magazine_transfer(source_paths, dests)
             return
@@ -2531,6 +2595,9 @@ class TransferPage(QWidget, ActivityLogMixin):
                         kwargs.setdefault("source_path", self.source)
                         kwargs.setdefault("destination_path", self.destination)
                         self.manifest.write(**kwargs)
+                    def close(self):
+                        if hasattr(self.manifest, "close"):
+                            self.manifest.close()
 
                 def emit_role_progress(role: str, status: str = "Running", increment: bool = False):
                     nonlocal aggregate_done
@@ -2652,6 +2719,8 @@ class TransferPage(QWidget, ActivityLogMixin):
                 def write_reports(ctx: dict):
                     role = ctx["role"]
                     manifest_csv = ctx["manifest_csv"]
+                    if hasattr(ctx["manifest"], "close"):
+                        ctx["manifest"].close()
                     if self.report_html.isChecked():
                         report_name = f"MediaRunner_Report_{safe_project}_{ctx['safe_role']}_{ts}.html"
                         report = ctx["checksums"] / report_name
@@ -3391,6 +3460,7 @@ class FTPPage(QWidget, ActivityLogMixin):
                         port=cfg.get("ftp_port",21),
                         timeout=cfg.get("ftp_timeout",2.0),
                         scan_threads=cfg.get("scan_threads",24),
+                        download_workers=cfg.get("ftp_download_workers", cfg.get("scan_threads", 24)),
                         progress_callback=lambda d,t,di=dest_idx: sig.progress.emit((di-1)*max(t,1)+d, max(total_dest*max(t,1), 1)),
                         cancel_event=self.cancel_event,
                         log_callback=sig.log.emit,
@@ -4006,6 +4076,7 @@ class MetadataPage(QWidget, ActivityLogMixin):
                     metadata_type=metadata_type,
                     keep_sidecars=keep_per_clip,
                     save_raw=save_raw,
+                    metadata_workers=cfg.get("metadata_workers", 4),
                     tool_config=cfg,
                     progress_callback=lambda done,total,path,row: (sig.table_row.emit(row), sig.progress.emit(done,total)),
                     log_callback=lambda msg: sig.log.emit(msg),
@@ -4022,6 +4093,7 @@ class MetadataPage(QWidget, ActivityLogMixin):
                         status=row.get("status", ""),
                         note=f"{row.get('metadata_type','')} · {row.get('tool','')} · {row.get('warnings','')}",
                     )
+                manifest.close()
                 sig.master_csv.emit(str(result.master_csv))
                 sig.report_html.emit(str(result.report_html))
                 sig.log.emit(f"Master CSV: {result.master_csv}")
@@ -5190,6 +5262,15 @@ Please do not attach camera originals unless explicitly requested.
         )
         tool_hint.setWordWrap(True)
         tools_v.addWidget(tool_hint)
+        worker_row = QHBoxLayout()
+        worker_row.addWidget(label("Metadata workers"))
+        self.metadata_workers = QSpinBox()
+        self.metadata_workers.setRange(1, 24)
+        worker_row.addWidget(self.metadata_workers)
+        worker_note = label("Parallel REDline / ffprobe / ExifTool files", "muted")
+        worker_row.addWidget(worker_note)
+        worker_row.addStretch()
+        tools_v.addLayout(worker_row)
         tg = QGridLayout()
         tg.setSpacing(10)
         tg.setColumnStretch(1, 1)
@@ -5480,6 +5561,7 @@ Please do not attach camera originals unless explicitly requested.
         self.magazine_subfolders.setChecked(bool(cfg.get("linux_stage_magazine_subfolders", True)))
         self.throughput_counts.setText(str(cfg.get("linux_throughput_worker_counts", "1,2,4,6,8,12") or "1,2,4,6,8,12"))
         self.throughput_size.setValue(float(cfg.get("linux_throughput_gib_per_worker", 1.0) or 1.0))
+        self.metadata_workers.setValue(int(cfg.get("metadata_workers", 4) or 4))
         self.redline_path.setText(str(cfg.get("redline_path", "") or ""))
         self.ffmpeg_path.setText(str(cfg.get("ffmpeg_path", "") or ""))
         self.ffprobe_path.setText(str(cfg.get("ffprobe_path", "") or ""))
@@ -5498,6 +5580,7 @@ Please do not attach camera originals unless explicitly requested.
             "linux_stage_magazine_subfolders": self.magazine_subfolders.isChecked(),
             "linux_throughput_worker_counts": self.throughput_counts.text().strip() or "1,2,4,6,8,12",
             "linux_throughput_gib_per_worker": float(self.throughput_size.value() or 1.0),
+            "metadata_workers": self.metadata_workers.value(),
             "redline_path": self.redline_path.text().strip(),
             "ffmpeg_path": self.ffmpeg_path.text().strip(),
             "ffprobe_path": self.ffprobe_path.text().strip(),
@@ -5521,6 +5604,7 @@ Please do not attach camera originals unless explicitly requested.
         self.magazine_subfolders.setChecked(True)
         self.throughput_counts.setText("1,2,4,6,8,12")
         self.throughput_size.setValue(1.0)
+        self.metadata_workers.setValue(4)
         self.redline_path.clear()
         self.ffmpeg_path.clear()
         self.ffprobe_path.clear()
@@ -5555,6 +5639,59 @@ Please do not attach camera originals unless explicitly requested.
 
     def finish_sound_enabled(self):
         return bool(self.finish_sound.isChecked())
+
+
+ALERTS_HELP_HTML = """
+<h2>Alerts setup &amp; troubleshooting</h2>
+<p>MediaRunner can notify you when a transfer completes, fails, or is cancelled,
+by email and/or Google Chat. Both need internet access at send time &mdash; on an
+offline/air-gapped set they simply won't send (no error is raised).</p>
+
+<h3>Email (Gmail / Google Workspace)</h3>
+<ol>
+<li>Check <b>Enable email alerts</b>.</li>
+<li><b>SMTP host:</b> <code>smtp.gmail.com</code> &nbsp; <b>Port:</b> <code>587</code>
+&nbsp; <b>Security:</b> <code>STARTTLS</code>.</li>
+<li><b>Username</b> and <b>From:</b> your full Gmail or Workspace address (they must match
+the authenticated account &mdash; Google rejects a mismatched From).</li>
+<li><b>Password:</b> a Google <b>App Password</b>, <i>not</i> your normal login password.
+Turn on 2-Step Verification first, then create one at
+<a href="https://myaccount.google.com/apppasswords">myaccount.google.com/apppasswords</a>
+and paste the 16-character code here.</li>
+<li><b>To:</b> one or more recipients, comma-separated.</li>
+<li><b>Save Alerts</b>, then <b>Send Test</b>. You should get a "MediaRunner: Test" email.</li>
+</ol>
+<p><b>Other providers / work relay:</b> use your provider's host and port. Port
+<code>465</code> &rarr; Security <code>SSL/TLS</code>; port <code>587</code> &rarr;
+<code>STARTTLS</code>. Many internal relays on a trusted network need no username or
+password &mdash; leave both blank.</p>
+
+<h3>Google Chat</h3>
+<ol>
+<li>In Google Chat, open the target <b>Space</b> (must be a named Space, not a DM).</li>
+<li>Click the space name &rarr; <b>Apps &amp; integrations</b> &rarr; <b>Webhooks</b>
+&rarr; <b>Add webhook</b>. Name it (e.g. "MediaRunner") and Save.</li>
+<li><b>Copy the URL it generates</b> and paste it into <b>Webhook URL</b> here.</li>
+<li>Check <b>Enable Google Chat alerts</b>, <b>Save Alerts</b>, <b>Send Test</b>.</li>
+</ol>
+<p>A valid webhook URL looks like
+<code>https://chat.googleapis.com/v1/spaces/&hellip;/messages?key=&hellip;&amp;token=&hellip;</code>.
+Incoming webhooks require <b>Google Workspace</b> &mdash; personal @gmail.com accounts don't
+have the Webhooks option.</p>
+
+<h3>Troubleshooting</h3>
+<ul>
+<li><b>Google Chat "HTTP 401 Unauthorized":</b> you pasted a browser link
+(<code>chat.google.com/room/&hellip;</code> or <code>/app/chat/&hellip;</code>) instead of a
+webhook. Regenerate the incoming webhook and use the <code>chat.googleapis.com</code> URL.</li>
+<li><b>Email auth / login error:</b> use an App Password (not your account password),
+confirm 2-Step Verification is on, and make sure Username and From are the same address.</li>
+<li><b>Nothing arrives:</b> confirm the machine is online. Alerts don't queue &mdash; if the
+network is down at completion, that notification is skipped.</li>
+<li>Credentials are stored in the local MediaRunner config, so use a dedicated app password
+you can revoke rather than your main credentials.</li>
+</ul>
+"""
 
 
 class AlertsPage(QWidget):
@@ -5649,11 +5786,15 @@ class AlertsPage(QWidget):
         self.test_btn.clicked.connect(self.send_test)
         save = QPushButton("Save Alerts")
         save.clicked.connect(self.save)
+        howto = QPushButton("How to…")
+        howto.setToolTip("Setup and troubleshooting for email and Google Chat alerts")
+        howto.clicked.connect(self.show_help)
         defaults = QPushButton("Restore Defaults")
         defaults.clicked.connect(self.restore_defaults)
         self.status = label("Ready", "muted")
         buttons.addWidget(self.test_btn)
         buttons.addWidget(save)
+        buttons.addWidget(howto)
         buttons.addWidget(self.status)
         buttons.addStretch()
         buttons.addWidget(defaults)
@@ -5664,6 +5805,23 @@ class AlertsPage(QWidget):
 
     def _on_test_finished(self, _ok: bool):
         self.test_btn.setEnabled(True)
+
+    def show_help(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Alerts — setup & troubleshooting")
+        dlg.resize(640, 580)
+        layout = QVBoxLayout(dlg)
+        browser = QTextBrowser(dlg)
+        browser.setOpenExternalLinks(True)
+        browser.setHtml(ALERTS_HELP_HTML)
+        layout.addWidget(browser, 1)
+        row = QHBoxLayout()
+        row.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dlg.accept)
+        row.addWidget(close_btn)
+        layout.addLayout(row)
+        dlg.exec()
 
     def load_config(self):
         from mediarunner_core import load_network_config
@@ -5801,6 +5959,8 @@ class FTPSettingsPage(QWidget):
         self.timeout.setSuffix(" sec")
         self.threads = QComboBox()
         self.threads.addItems(["4", "8", "12", "16", "24", "32"])
+        self.download_workers = QComboBox()
+        self.download_workers.addItems(["2", "4", "8", "12", "16", "24", "32", "36", "42"])
         self.skip_offline = QCheckBox("Skip offline cameras")
         g.addWidget(label("Username"), 0, 0)
         g.addWidget(self.user, 0, 1)
@@ -5816,7 +5976,9 @@ class FTPSettingsPage(QWidget):
         g.addWidget(self.udp_port, 2, 3)
         g.addWidget(label("Scan Threads"), 3, 0)
         g.addWidget(self.threads, 3, 1)
-        g.addWidget(self.skip_offline, 3, 2, 1, 2)
+        g.addWidget(label("FTP Download Workers"), 3, 2)
+        g.addWidget(self.download_workers, 3, 3)
+        g.addWidget(self.skip_offline, 4, 0, 1, 4)
         v.addLayout(g)
         discovery_note = label("UDP discovery uses the RED RCP SDK packet flow on port 1112; this page also probes RCP2 WebSocket identity on configured IPs and active local subnets.", "muted")
         discovery_note.setWordWrap(True)
@@ -5888,6 +6050,9 @@ class FTPSettingsPage(QWidget):
         thread_val = str(int(cfg.get("scan_threads", 24)))
         idx = self.threads.findText(thread_val)
         self.threads.setCurrentIndex(idx if idx >= 0 else self.threads.findText("24"))
+        worker_val = str(int(cfg.get("ftp_download_workers", cfg.get("scan_threads", 24))))
+        worker_idx = self.download_workers.findText(worker_val)
+        self.download_workers.setCurrentIndex(worker_idx if worker_idx >= 0 else self.download_workers.findText("24"))
         self.skip_offline.setChecked(bool(cfg.get("skip_offline", True)))
         self.camera_table.setRowCount(0)
         for cam, ip in sorted(cfg.get("cameras", {}).items()):
@@ -5910,6 +6075,7 @@ class FTPSettingsPage(QWidget):
             "rcp2_udp_port": self.udp_port.value(),
             "ftp_timeout": self.timeout.value(),
             "scan_threads": int(self.threads.currentText()),
+            "ftp_download_workers": int(self.download_workers.currentText()),
             "skip_offline": self.skip_offline.isChecked(),
             "cameras": cams,
         })
@@ -5927,7 +6093,7 @@ class FTPSettingsPage(QWidget):
         # Preserve non-networking app preferences from Settings/Alerts.
         networking_keys = {
             "ftp_user", "ftp_pass", "ftp_port", "rcp2_port", "rcp2_udp_port",
-            "ftp_timeout", "scan_threads", "skip_offline", "cameras",
+            "ftp_timeout", "scan_threads", "ftp_download_workers", "skip_offline", "cameras",
         }
         for key, value in current.items():
             if key not in networking_keys:
@@ -5940,6 +6106,8 @@ class FTPSettingsPage(QWidget):
         self.timeout.setValue(float(defaults.get("ftp_timeout", 2.0)))
         idx = self.threads.findText(str(int(defaults.get("scan_threads", 24))))
         self.threads.setCurrentIndex(idx if idx >= 0 else self.threads.findText("24"))
+        worker_idx = self.download_workers.findText(str(int(defaults.get("ftp_download_workers", 24))))
+        self.download_workers.setCurrentIndex(worker_idx if worker_idx >= 0 else self.download_workers.findText("24"))
         self.skip_offline.setChecked(bool(defaults.get("skip_offline", True)))
         self.camera_table.setRowCount(0)
         for cam, ip in sorted(defaults.get("cameras", {}).items()):

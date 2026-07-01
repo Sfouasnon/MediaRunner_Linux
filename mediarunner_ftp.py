@@ -470,10 +470,23 @@ def _verify_clip(
     return clip_failures
 
 
+def ftp_download_worker_count(
+    active_camera_count: int,
+    *,
+    scan_threads: int = 24,
+    download_workers: int | None = None,
+) -> tuple[int, int]:
+    """Return (effective_workers, requested_workers) for camera downloads."""
+    active = max(1, int(active_camera_count or 1))
+    requested = max(1, int(download_workers if download_workers is not None else (scan_threads or 1)))
+    return max(1, min(requested, active)), requested
+
+
 def pull_reel_clips(reel: str, clips: str, output_dir: Path, manifest: Manifest,
                     cameras: dict[str, str] | None = None, online_only: bool = True,
                     port: int | None = None, timeout: float | None = None,
-                    scan_threads: int = 24, progress_callback=None, cancel_event=None,
+                    scan_threads: int = 24, download_workers: int | None = None,
+                    progress_callback=None, cancel_event=None,
                     log_callback=None, file_progress_callback=None,
                     destination_role: str = "", report_callback=None,
                     verify_with_mhl: bool = True, require_mhl: bool = False) -> tuple[int, int]:
@@ -497,7 +510,7 @@ def pull_reel_clips(reel: str, clips: str, output_dir: Path, manifest: Manifest,
     # "FTP error 12/42" even though all 12 connected cameras succeeded.
     if online_only and cams:
         roster_size = len(cams)
-        statuses = scan_cameras(cams, port=port, timeout=timeout)
+        statuses = scan_cameras(cams, port=port, timeout=timeout, max_workers=scan_threads)
         online_cams = {label: ip for label, ip in cams.items() if statuses.get(label)}
         skipped = roster_size - len(online_cams)
         notice = (f"Online check: {len(online_cams)} of {roster_size} cameras reachable"
@@ -516,14 +529,15 @@ def pull_reel_clips(reel: str, clips: str, output_dir: Path, manifest: Manifest,
 
     reel_digits = ''.join(ch for ch in str(reel or '') if ch.isdigit()).zfill(3)
     wanted = parse_clip_numbers(str(clips or ''))
-    requested_scan_threads = int(scan_threads or 1)
     active_camera_count = len(cams) if cams else 0
-    worker_cap = 2 if active_camera_count >= 8 else 3
-    capped_request = min(max(1, requested_scan_threads), worker_cap)
-    max_workers = max(1, min(capped_request, active_camera_count or 1))
+    max_workers, requested_download_workers = ftp_download_worker_count(
+        active_camera_count,
+        scan_threads=scan_threads,
+        download_workers=download_workers,
+    )
 
-    if capped_request != max(1, requested_scan_threads):
-        message = f"Auto-throttle FTP workers: requested {requested_scan_threads}, using {max_workers}"
+    if requested_download_workers != max_workers:
+        message = f"FTP workers: requested {requested_download_workers}, using {max_workers} for {active_camera_count} active camera(s)"
         if log_callback:
             log_callback(message)
         else:
@@ -551,19 +565,11 @@ def pull_reel_clips(reel: str, clips: str, output_dir: Path, manifest: Manifest,
         return any(re.search(rf"(?:^|[^0-9]){re.escape(num)}(?:[^0-9]|$)", up) for num in wanted)
 
     progress_lock = threading.Lock()
-    write_lock = threading.Lock()
     done = 0
     total = max(1, len(cams))
     progress_state: dict[str, float] = {}
     progress_state_lock = threading.Lock()
-
-    class LockedManifest:
-        path = manifest.path
-        def write(self, **kwargs):
-            with write_lock:
-                manifest.write(**kwargs)
-
-    locked_manifest = LockedManifest()
+    locked_manifest = manifest
 
     def report_progress():
         nonlocal done
@@ -813,6 +819,16 @@ def pull_reel_clips(reel: str, clips: str, output_dir: Path, manifest: Manifest,
             ok_total += ok
             fail_total += fail
 
+    if hasattr(manifest, "close"):
+        try:
+            manifest.close()
+        except Exception:
+            pass
+    elif hasattr(manifest, "flush"):
+        try:
+            manifest.flush()
+        except Exception:
+            pass
     if manifest.path.exists():
         report_path = finalize_ftp_manifest(
             manifest.path,

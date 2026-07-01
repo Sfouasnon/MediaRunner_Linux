@@ -27,19 +27,35 @@ from mediarunner_core import (  # noqa: E402
     write_html_report,
 )
 from mediarunner_gui import format_mediarunner_clock, mediarunner_clock_tokens  # noqa: E402
+from mediarunner_ftp import ftp_download_worker_count  # noqa: E402
+from mediarunner_meta import metadata_worker_count  # noqa: E402
 from mediarunner_transfer import copy2_with_progress, transfer_file  # noqa: E402
 
 
 class FakeFTP:
     def __init__(self, chunks: list[bytes]):
         self.chunks = list(chunks)
+        self.cancel_check = None
+        self.cancel_after_chunks = 0
 
     def size(self, remote: str) -> int:
         return sum(len(chunk) for chunk in self.chunks)
 
-    def retrbinary(self, command: str, callback, blocksize: int | None = None):
+    def retrbinary(self, command: str, callback, blocksize: int | None = None, rest: int | None = None):
+        offset = max(0, int(rest or 0))
+        sent = 0
         for chunk in self.chunks:
-            callback(chunk)
+            if self.cancel_check and self.cancel_check():
+                raise TransferCancelledError("Cancelled by fake FTP stream")
+            next_sent = sent + len(chunk)
+            if next_sent <= offset:
+                sent = next_sent
+                continue
+            start = max(0, offset - sent)
+            callback(chunk[start:])
+            sent = next_sent
+            if self.cancel_after_chunks and sent >= self.cancel_after_chunks:
+                raise TransferCancelledError("Cancelled by fake FTP stream")
 
 
 class ProductionHardeningTests(unittest.TestCase):
@@ -107,12 +123,14 @@ class ProductionHardeningTests(unittest.TestCase):
             part = dst.with_name(dst.name + ".part")
             chunks = [b"A" * 32, b"B" * 32, b"C" * 32]
             ftp = FakeFTP(chunks)
+            ftp.cancel_after_chunks = 32
             cancelled = {"flag": False}
 
             def progress(event: dict) -> None:
                 if int(event.get("done") or 0) >= 32:
                     cancelled["flag"] = True
 
+            ftp.cancel_check = lambda: cancelled["flag"]
             with self.assertRaises(TransferCancelledError):
                 _ftp_download_file(
                     ftp,
@@ -153,6 +171,21 @@ class ProductionHardeningTests(unittest.TestCase):
             self.assertTrue(row["verification_status"])
             self.assertTrue(row["xxhash"])
             self.assertTrue(row["sha256"])
+
+    def test_ftp_download_workers_do_not_hard_cap_large_arrays(self):
+        workers, requested = ftp_download_worker_count(36, scan_threads=24, download_workers=24)
+        self.assertEqual(requested, 24)
+        self.assertEqual(workers, 24)
+
+        workers, requested = ftp_download_worker_count(36, scan_threads=24, download_workers=42)
+        self.assertEqual(requested, 42)
+        self.assertEqual(workers, 36)
+
+    def test_metadata_workers_are_configurable_and_bounded(self):
+        self.assertEqual(metadata_worker_count(100, 8), 8)
+        self.assertEqual(metadata_worker_count(3, 8), 3)
+        self.assertEqual(metadata_worker_count(100, 99), 24)
+        self.assertEqual(metadata_worker_count(100, 0), 1)
 
     def test_report_summary_counts_only_verified_success(self):
         with TemporaryDirectory() as td:

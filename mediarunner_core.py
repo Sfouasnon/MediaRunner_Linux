@@ -14,6 +14,7 @@ import logging
 import hashlib
 import subprocess
 import shutil
+import threading
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -130,6 +131,7 @@ def default_network_config() -> dict:
         "rcp2_udp_port": RCP2_UDP_PORT,
         "ftp_timeout": FTP_TIMEOUT,
         "scan_threads": 24,
+        "ftp_download_workers": 24,
         "skip_offline": True,
         "finish_sound": True,
         "log_dir": "",
@@ -137,6 +139,7 @@ def default_network_config() -> dict:
         "ffmpeg_path": "",
         "ffprobe_path": "",
         "exiftool_path": "",
+        "metadata_workers": 4,
         "alerts_notify_success": True,
         "alerts_notify_failure": True,
         "alerts_notify_cancelled": True,
@@ -151,6 +154,7 @@ def default_network_config() -> dict:
         "alerts_email_subject_prefix": "MediaRunner",
         "alerts_gchat_enabled": False,
         "alerts_gchat_webhook_url": "",
+        "checksum_algorithms": "xxh128,sha256",
         "linux_max_simultaneous_magazines": 6,
         "linux_threads_per_magazine": 1,
         "linux_stage_magazine_subfolders": True,
@@ -172,6 +176,8 @@ def _normalize_network_config(cfg: Optional[dict]) -> dict:
     base["rcp2_udp_port"] = int(base.get("rcp2_udp_port") or 1112)
     base["ftp_timeout"] = float(base.get("ftp_timeout") or 2.0)
     base["scan_threads"] = max(1, int(base.get("scan_threads") or 24))
+    base["ftp_download_workers"] = max(1, int(base.get("ftp_download_workers") or base.get("scan_threads") or 24))
+    base["metadata_workers"] = max(1, min(24, int(base.get("metadata_workers") or 4)))
     base["skip_offline"] = bool(base.get("skip_offline", True))
     base["finish_sound"] = bool(base.get("finish_sound", True))
     base["linux_max_simultaneous_magazines"] = max(1, min(24, int(base.get("linux_max_simultaneous_magazines") or 6)))
@@ -242,7 +248,7 @@ def _normalize_network_config(cfg: Optional[dict]) -> dict:
     base["alerts_smtp_port"] = int(base.get("alerts_smtp_port") or 587)
     for key in (
         "redline_path", "ffmpeg_path", "ffprobe_path", "exiftool_path", "log_dir",
-        "linux_throughput_worker_counts",
+        "linux_throughput_worker_counts", "checksum_algorithms",
         "alerts_smtp_host", "alerts_smtp_security", "alerts_smtp_username",
         "alerts_smtp_password", "alerts_email_from", "alerts_email_to",
         "alerts_email_subject_prefix", "alerts_gchat_webhook_url",
@@ -681,6 +687,45 @@ FAILURE_TRANSFER_STATUSES = {
 }
 
 DEFAULT_CHECKSUM_ALGORITHMS = ("xxh128", "sha256")
+SUPPORTED_CHECKSUM_ALGORITHMS = ("xxh128", "xxh3_64be", "xxh64", "sha256", "sha1", "md5")
+
+# Aliases so UI / config strings map to canonical names.
+_CHECKSUM_ALIASES = {
+    "xxh3": "xxh3_64be", "xxh3-64": "xxh3_64be", "xxh3_64": "xxh3_64be",
+    "xxh3-64be": "xxh3_64be", "xxh3_64be": "xxh3_64be", "xxh3-64-be": "xxh3_64be",
+}
+
+# The active algorithm set for a job. Defaults to the factory pair; the GUI (or a
+# caller) sets it per job so users can pick a single fast checksum instead of two.
+_ACTIVE_CHECKSUM_ALGORITHMS: tuple[str, ...] = DEFAULT_CHECKSUM_ALGORITHMS
+
+
+def parse_checksum_algorithms(text) -> tuple[str, ...]:
+    """Parse a config/UI value like 'xxh3_64be' or 'xxh128,sha256' into a
+    validated tuple. Falls back to the factory default on empty/invalid input."""
+    if not text:
+        return tuple(DEFAULT_CHECKSUM_ALGORITHMS)
+    if isinstance(text, (list, tuple)):
+        parts = list(text)
+    else:
+        parts = [p for p in str(text).replace(";", ",").split(",")]
+    try:
+        normalized = _normalized_algorithms(parts)
+    except ValueError:
+        return tuple(DEFAULT_CHECKSUM_ALGORITHMS)
+    return tuple(normalized) or tuple(DEFAULT_CHECKSUM_ALGORITHMS)
+
+
+def get_active_checksum_algorithms() -> tuple[str, ...]:
+    return tuple(_ACTIVE_CHECKSUM_ALGORITHMS)
+
+
+def set_active_checksum_algorithms(algorithms) -> tuple[str, ...]:
+    """Set the algorithms used when a copy/verify is not passed an explicit list.
+    Called once per job (main thread) before workers start."""
+    global _ACTIVE_CHECKSUM_ALGORITHMS
+    _ACTIVE_CHECKSUM_ALGORITHMS = parse_checksum_algorithms(algorithms)
+    return _ACTIVE_CHECKSUM_ALGORITHMS
 
 
 class TransferCancelledError(RuntimeError):
@@ -721,20 +766,52 @@ def _flush_and_fsync(handle) -> None:
     os.fsync(handle.fileno())
 
 
+# Cold verification: unless disabled, drop the OS page cache for a file so the
+# next read comes from the physical device instead of RAM. fsync guarantees the
+# bytes are persisted, but the pages we just wrote stay cached, so a plain
+# read-back can be served from memory and would not catch a drive that persisted
+# the data yet reads it back badly. Dropping the cache makes destination
+# verification a true device read. Set MEDIARUNNER_COLD_VERIFY=0 to disable.
+COLD_VERIFY = os.environ.get("MEDIARUNNER_COLD_VERIFY", "1") not in ("0", "false", "False", "")
+
+
+def _advise_cold_read(fd: int) -> None:
+    """Best-effort eviction of a file's cached pages by descriptor.
+
+    Linux: posix_fadvise(DONTNEED) drops the (already-synced, clean) pages.
+    macOS: F_NOCACHE tells the kernel to bypass the cache for this descriptor.
+    A no-op wherever neither is available; failures are logged at debug level
+    and never interrupt a transfer.
+    """
+    try:
+        if hasattr(os, "posix_fadvise") and hasattr(os, "POSIX_FADV_DONTNEED"):
+            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+            return
+    except OSError as exc:
+        logger.debug("posix_fadvise(DONTNEED) failed on fd %s: %s", fd, exc)
+    try:
+        import fcntl  # macOS fallback
+        F_NOCACHE = 48
+        fcntl.fcntl(fd, F_NOCACHE, 1)
+    except Exception as exc:  # pragma: no cover - platform dependent
+        logger.debug("F_NOCACHE failed on fd %s: %s", fd, exc)
+
+
 def _normalized_algorithms(
     algorithms: tuple[str, ...] | list[str] | None = None,
     *,
     include_md5: bool = False,
 ) -> list[str]:
-    requested = list(algorithms or DEFAULT_CHECKSUM_ALGORITHMS)
+    requested = list(algorithms or _ACTIVE_CHECKSUM_ALGORITHMS)
     if include_md5 and "md5" not in requested:
         requested.append("md5")
     normalized: list[str] = []
     for alg in requested:
         name = str(alg or "").strip().lower()
+        name = _CHECKSUM_ALIASES.get(name, name)
         if not name or name in normalized:
             continue
-        if name not in {"xxh128", "xxh64", "sha256", "sha1", "md5"}:
+        if name not in {"xxh128", "xxh3_64be", "xxh64", "sha256", "sha1", "md5"}:
             raise ValueError(f"Unsupported checksum algorithm: {alg}")
         normalized.append(name)
     return normalized
@@ -748,6 +825,12 @@ def _new_hasher(algorithm: str):
         except Exception as exc:  # pragma: no cover - dependency is required in normal builds
             raise RuntimeError("xxh128 requested but xxhash is unavailable") from exc
         return xxhash.xxh128()
+    if name == "xxh3_64be":
+        try:
+            import xxhash  # type: ignore
+        except Exception as exc:  # pragma: no cover - dependency is required in normal builds
+            raise RuntimeError("xxh3_64be requested but xxhash is unavailable") from exc
+        return xxhash.xxh3_64()  # .hexdigest() is big-endian
     if name == "xxh64":
         try:
             import xxhash  # type: ignore
@@ -765,7 +848,7 @@ def _new_hasher(algorithm: str):
 
 def checksum_algorithm_label(checksums: dict[str, str] | tuple[str, ...] | list[str] | None) -> str:
     if isinstance(checksums, dict):
-        names = [name for name in ("xxh128", "xxh64", "sha256", "sha1", "md5") if str(checksums.get(name, "")).strip()]
+        names = [name for name in ("xxh128", "xxh3_64be", "xxh64", "sha256", "sha1", "md5") if str(checksums.get(name, "")).strip()]
     else:
         names = _normalized_algorithms(list(checksums or ()))
     return ",".join(names)
@@ -812,10 +895,14 @@ def compute_checksums(
     algorithms: tuple[str, ...] | list[str] | None = None,
     include_md5: bool = False,
     chunk_size: int = 1 << 20,
+    cold: bool = False,
 ) -> dict[str, str]:
     path = Path(path)
     hashers = {name: _new_hasher(name) for name in _normalized_algorithms(algorithms, include_md5=include_md5)}
     with path.open("rb") as handle:
+        if cold:
+            # Evict cached pages so this hash reflects a real device read, not RAM.
+            _advise_cold_read(handle.fileno())
         for chunk in iter(lambda: handle.read(int(chunk_size)), b""):
             for hasher in hashers.values():
                 hasher.update(chunk)
@@ -867,7 +954,7 @@ def copy_file_to_part_with_hash(
     if part.exists():
         part.unlink()
     if algorithms is None:
-        algorithms = DEFAULT_CHECKSUM_ALGORITHMS
+        algorithms = _ACTIVE_CHECKSUM_ALGORITHMS
     hashers = {name: _new_hasher(name) for name in _normalized_algorithms(list(algorithms))} if algorithms else {}
     with src.open("rb") as reader, part.open("wb") as writer:
         try:
@@ -886,6 +973,10 @@ def copy_file_to_part_with_hash(
                     except Exception:
                         pass
             _flush_and_fsync(writer)
+            if COLD_VERIFY:
+                # Evict the pages we just wrote so the upcoming verification
+                # re-reads them from the device rather than the cache.
+                _advise_cold_read(writer.fileno())
         except Exception:
             try:
                 _flush_and_fsync(writer)
@@ -971,8 +1062,13 @@ def verify_file_pair(
         result.note = f"Size mismatch: source {result.source_size}, destination {result.destination_size}"
         return result
 
-    result.source_checksums = dict(source_checksums or compute_checksums(source, algorithms=normalized))
-    result.destination_checksums = compute_checksums(destination, algorithms=normalized)
+    # Destination is always read cold so verification is a true device readback,
+    # never a page-cache hit. The source is read cold only when we actually read
+    # it here (i.e. it wasn't already hashed during the copy — audit fix #7).
+    result.source_checksums = dict(
+        source_checksums or compute_checksums(source, algorithms=normalized, cold=COLD_VERIFY)
+    )
+    result.destination_checksums = compute_checksums(destination, algorithms=normalized, cold=COLD_VERIFY)
     mismatched = [
         name for name in normalized
         if str(result.source_checksums.get(name, "")) != str(result.destination_checksums.get(name, ""))
@@ -1051,9 +1147,16 @@ def verification_result_to_manifest_kwargs(result: VerificationResult, **extra) 
     status = status or result.status
     note_parts = [str(result.note or "").strip(), str(row.get("note", "") or "").strip()]
     error_text = str(row.get("error", "") or result.error or "").strip()
+    def _first_xxhash(checksums: dict) -> str:
+        for name in ("xxh128", "xxh3_64be", "xxh64"):
+            val = str(checksums.get(name, "") or "").strip()
+            if val:
+                return val
+        return ""
     xxhash_value = (
         str(row.get("xxhash", "") or "")
-        or str(result.destination_checksums.get("xxh128", "") or result.source_checksums.get("xxh128", ""))
+        or _first_xxhash(result.destination_checksums)
+        or _first_xxhash(result.source_checksums)
     )
     sha256_value = (
         str(row.get("sha256", "") or "")
@@ -1153,46 +1256,81 @@ MANIFEST_FIELDS = [
 
 class Manifest:
     def __init__(self, path: Path):
-        self.path = path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if not path.exists():
-            with open(path, "w", newline="") as f:
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
+        self._handle = None
+        self._writer = None
+        if not self.path.exists() or self.path.stat().st_size == 0:
+            with open(self.path, "w", newline="", encoding="utf-8") as f:
                 csv.DictWriter(f, fieldnames=MANIFEST_FIELDS).writeheader()
 
+    def _ensure_writer(self):
+        if self._handle is None or self._handle.closed:
+            self._handle = open(self.path, "a", newline="", encoding="utf-8")
+            self._writer = csv.DictWriter(self._handle, fieldnames=MANIFEST_FIELDS)
+        return self._writer
+
     def write(self, **kwargs):
-        # Backwards compatibility: older internal modules still pass stage="Transfer"/"FTP"/"Meta".
-        if "stage" in kwargs and "method" not in kwargs:
-            kwargs["method"] = kwargs.pop("stage")
-        elif "stage" in kwargs:
-            kwargs.pop("stage", None)
-        status = str(kwargs.get("verification_status") or kwargs.get("status") or "").strip()
-        if status:
-            kwargs.setdefault("status", status)
-            kwargs.setdefault("verification_status", status)
-            kwargs.setdefault("verification_time", _verification_timestamp())
-        kwargs.setdefault("verification_source", default_verification_source(kwargs.get("verification_status") or kwargs.get("status")))
-        size_bytes = _manifest_size_bytes(kwargs.get("size_bytes") or kwargs.get("destination_size") or kwargs.get("source_size"))
-        if size_bytes > 0:
-            kwargs.setdefault("size_bytes", str(size_bytes))
-            kwargs.setdefault("size_human", human_size(size_bytes))
-        kwargs.setdefault("retry_count", str(kwargs.get("retry_count") or "0"))
-        if not kwargs.get("xxhash"):
-            kwargs["xxhash"] = str(kwargs.get("dst_hash") or kwargs.get("src_hash") or "")
-        if not kwargs.get("checksum_algorithm"):
-            kwargs["checksum_algorithm"] = checksum_algorithm_label({
-                "xxh128": str(kwargs.get("xxhash") or kwargs.get("dst_hash") or kwargs.get("src_hash") or ""),
-                "sha256": str(kwargs.get("sha256") or ""),
-                "md5": str(kwargs.get("md5") or ""),
-            })
-        if not kwargs.get("note") and kwargs.get("error"):
-            kwargs["note"] = kwargs.get("error")
-        row = {k: "" for k in MANIFEST_FIELDS}
-        row["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        for k, v in kwargs.items():
-            if k in row:
-                row[k] = v
-        with open(self.path, "a", newline="") as f:
-            csv.DictWriter(f, fieldnames=MANIFEST_FIELDS).writerow(row)
+        with self._lock:
+            # Backwards compatibility: older internal modules still pass stage="Transfer"/"FTP"/"Meta".
+            if "stage" in kwargs and "method" not in kwargs:
+                kwargs["method"] = kwargs.pop("stage")
+            elif "stage" in kwargs:
+                kwargs.pop("stage", None)
+            status = str(kwargs.get("verification_status") or kwargs.get("status") or "").strip()
+            if status:
+                kwargs.setdefault("status", status)
+                kwargs.setdefault("verification_status", status)
+                kwargs.setdefault("verification_time", _verification_timestamp())
+            kwargs.setdefault("verification_source", default_verification_source(kwargs.get("verification_status") or kwargs.get("status")))
+            size_bytes = _manifest_size_bytes(kwargs.get("size_bytes") or kwargs.get("destination_size") or kwargs.get("source_size"))
+            if size_bytes > 0:
+                kwargs.setdefault("size_bytes", str(size_bytes))
+                kwargs.setdefault("size_human", human_size(size_bytes))
+            kwargs.setdefault("retry_count", str(kwargs.get("retry_count") or "0"))
+            if not kwargs.get("xxhash"):
+                kwargs["xxhash"] = str(kwargs.get("dst_hash") or kwargs.get("src_hash") or "")
+            if not kwargs.get("checksum_algorithm"):
+                kwargs["checksum_algorithm"] = checksum_algorithm_label({
+                    "xxh128": str(kwargs.get("xxhash") or kwargs.get("dst_hash") or kwargs.get("src_hash") or ""),
+                    "sha256": str(kwargs.get("sha256") or ""),
+                    "md5": str(kwargs.get("md5") or ""),
+                })
+            if not kwargs.get("note") and kwargs.get("error"):
+                kwargs["note"] = kwargs.get("error")
+            row = {k: "" for k in MANIFEST_FIELDS}
+            row["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            for k, v in kwargs.items():
+                if k in row:
+                    row[k] = v
+            self._ensure_writer().writerow(row)
+            self._handle.flush()
+
+    def flush(self):
+        with self._lock:
+            if self._handle is not None and not self._handle.closed:
+                self._handle.flush()
+
+    def close(self):
+        with self._lock:
+            if self._handle is not None and not self._handle.closed:
+                self._handle.flush()
+                self._handle.close()
+            self._handle = None
+            self._writer = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exc_type, _exc, _tb):
+        self.close()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 def _manifest_size_bytes(value) -> int:

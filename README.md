@@ -22,6 +22,8 @@ robustness audit (findings #1–17) on top of 0.2.81-beta. See
 - Alerts tab supports optional SMTP email and Google Chat webhook notifications when transfers complete, fail, or are cancelled.
 - Linux Offload includes Multi-Mag mode for concurrent CFexpress magazine ingest, with persistent Linux Ingest settings for max simultaneous magazines and per-magazine threads.
 - Settings includes a safe Destination Throughput Test that writes temporary files, fsyncs them, reports aggregate stream throughput, saves a profile for that destination, and deletes the test folder.
+- FTP Camera Array downloads now use the configured FTP Download Workers setting instead of the old 2-worker ceiling for large arrays; manifests keep an open job handle to reduce row-write contention.
+- Metadata extraction now supports configurable parallel workers for REDline, ffprobe, and ExifTool per-file processing.
 
 ### Credentials note
 
@@ -54,6 +56,8 @@ Offload -> Source Mode: Multi-Mag -> Detect Mounted or Add Magazine -> Start Tra
 ```
 
 For Komodo-X CFexpress offloads, keep `Threads per magazine` low first and test each destination. MediaRunner saves the result as a destination profile, then Multi-Mag Offload applies the matching profile automatically. With multiple destinations selected, the most conservative matched profile caps magazine concurrency. MediaRunner writes each magazine into its own destination subfolder by default and creates per-magazine manifests/reports under `_checksums`.
+
+For tethered camera-array pulls, tune `Networking -> FTP Download Workers` against the actual switch and storage path. With 36 cameras online, MediaRunner can now run up to the configured worker count, capped only by active cameras.
 
 ## Run validation
 
